@@ -1,0 +1,73 @@
+services:
+  postgres-idp:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: idp
+      POSTGRES_PASSWORD: idp
+      POSTGRES_DB: idp
+    ports:
+      # Host 5434 (url-shortener uses 5432; a different subproject might too).
+      # Inside compose everything uses 5432, per container defaults.
+      - "5434:5432"
+    volumes:
+      - pgdata-idp:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U idp"]
+      interval: 2s
+      timeout: 2s
+      retries: 10
+
+  postgres-fga:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: openfga
+      POSTGRES_PASSWORD: openfga
+      POSTGRES_DB: openfga
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata-fga:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U openfga"]
+      interval: 2s
+      timeout: 2s
+      retries: 10
+
+  # OpenFGA runs its own migration once against its DB before it can serve.
+  # This one-shot service handles that; openfga (the server) waits for it.
+  openfga-migrate:
+    image: openfga/openfga:v1.9.4
+    depends_on:
+      postgres-fga:
+        condition: service_healthy
+    command: migrate
+    environment:
+      OPENFGA_DATASTORE_ENGINE: postgres
+      OPENFGA_DATASTORE_URI: postgres://openfga:openfga@postgres-fga:5432/openfga?sslmode=disable
+    restart: "no"
+
+  openfga:
+    image: openfga/openfga:v1.9.4
+    depends_on:
+      openfga-migrate:
+        condition: service_completed_successfully
+    command: run
+    environment:
+      OPENFGA_DATASTORE_ENGINE: postgres
+      OPENFGA_DATASTORE_URI: postgres://openfga:openfga@postgres-fga:5432/openfga?sslmode=disable
+      OPENFGA_LOG_FORMAT: json
+      OPENFGA_PLAYGROUND_ENABLED: "true"
+    ports:
+      - "8081:8080"   # HTTP API: host 8081 → container 8080
+      - "8082:8081"   # gRPC:     host 8082 → container 8081
+      - "3000:3000"   # playground UI
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/grpc_health_probe", "-addr=localhost:8081"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
+volumes:
+  pgdata-idp:
+  pgdata-fga:
