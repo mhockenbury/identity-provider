@@ -126,6 +126,30 @@ check-deps:
 		fi; \
 	done
 
+# check-deps-idp is the narrower variant for dev-* targets: only the IdP's
+# Postgres needs to be healthy. Layers 1–7 don't touch FGA; requiring
+# postgres-fga + openfga here would force people running `make dev-all` to
+# spin up services they don't need.
+check-deps-idp:
+	@status=$$(docker inspect --format='{{.State.Health.Status}}' identity-provider-postgres-idp-1 2>/dev/null || echo "missing"); \
+	if [ "$$status" != "healthy" ]; then \
+		echo "ERROR: postgres-idp is '$$status' — run 'make up-idp-only' (or 'make up' for full stack)."; \
+		exit 1; \
+	fi
+
+# up-idp-only brings up just postgres-idp (the IdP's Postgres). Fast path
+# for layer 1–7 work. The outbox worker (layer 8) will need the full stack
+# via `make up`.
+up-idp-only:
+	docker compose up -d postgres-idp
+	@echo "waiting for postgres-idp to be healthy..."
+	@for i in $$(seq 1 30); do \
+		status=$$(docker inspect --format='{{.State.Health.Status}}' identity-provider-postgres-idp-1 2>/dev/null || echo "missing"); \
+		if [ "$$status" = "healthy" ]; then echo "postgres-idp healthy"; exit 0; fi; \
+		sleep 1; \
+	done; \
+	echo "ERROR: postgres-idp did not become healthy within 30s"; exit 1
+
 _wait-deps:
 	@echo "waiting for compose services to be healthy..."
 	@for i in $$(seq 1 60); do \
