@@ -1,0 +1,39 @@
+model
+  schema 1.1
+
+# user — primitive identity, no relations of its own.
+type user
+
+# group — a named collection of users. Members come in via the
+# outbox-produced tuples (user:<id>, member, group:<id>).
+type group
+  relations
+    define member: [user]
+
+# folder — can contain other folders (nesting) or documents.
+#
+# Relations:
+#   owner  — direct user grant only
+#   editor — direct user OR group members OR inherited from parent folder,
+#            plus anyone who is an owner
+#   viewer — direct user OR group members OR inherited from parent folder,
+#            plus anyone who is an editor
+#
+# The "X from parent" syntax is tuple-to-userset rewrite: compute the
+# relation by following the parent tuple, then evaluate that relation on
+# the parent folder. This is where inheritance comes from.
+type folder
+  relations
+    define parent: [folder]
+    define owner:  [user]
+    define editor: [user, group#member] or owner  or editor from parent
+    define viewer: [user, group#member] or editor or viewer from parent
+
+# document — a leaf resource with a folder parent. Same inheritance
+# model as folder, just no children of its own.
+type document
+  relations
+    define parent: [folder]
+    define owner:  [user]
+    define editor: [user, group#member] or owner  or editor from parent
+    define viewer: [user, group#member] or editor or viewer from parent

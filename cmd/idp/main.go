@@ -13,6 +13,8 @@
 //   idp groups add-member <group> <user-email>       — add user to group (enqueues outbox event)
 //   idp groups remove-member <group> <user-email>    — remove user from group (enqueues outbox event)
 //   idp groups list-members <group>                  — list members of a group
+//   idp fga init                                      — bootstrap: create OpenFGA store + upload auth model
+//                                                       prints OPENFGA_STORE_ID + OPENFGA_AUTHORIZATION_MODEL_ID
 //
 // Env vars:
 //   DATABASE_URL                     required; e.g. postgres://idp:idp@localhost:5434/idp?sslmode=disable
@@ -42,6 +44,7 @@ import (
 
 	"github.com/mhockenbury/identity-provider/internal/clients"
 	"github.com/mhockenbury/identity-provider/internal/consent"
+	"github.com/mhockenbury/identity-provider/internal/fga"
 	myhttp "github.com/mhockenbury/identity-provider/internal/http"
 	"github.com/mhockenbury/identity-provider/internal/oauth"
 	"github.com/mhockenbury/identity-provider/internal/oidc"
@@ -71,12 +74,82 @@ func run(args []string) error {
 		return runUsers(args[1:])
 	case "groups":
 		return runGroups(args[1:])
+	case "fga":
+		return runFGA(args[1:])
 	case "-h", "--help", "help":
 		printUsage()
 		return nil
 	default:
 		return usageErr(fmt.Sprintf("unknown subcommand %q", args[0]))
 	}
+}
+
+// runFGA handles the `idp fga` subcommands. Today: init. Future stretch:
+// update-model (deploy a new model version), list-stores, etc.
+func runFGA(args []string) error {
+	if len(args) < 1 {
+		return usageErr("fga: no subcommand")
+	}
+
+	switch args[0] {
+	case "init":
+		return runFGAInit()
+	default:
+		return usageErr(fmt.Sprintf("fga: unknown subcommand %q", args[0]))
+	}
+}
+
+// runFGAInit creates a new OpenFGA store, uploads the authorization
+// model, and prints both IDs. The operator copies them into .env
+// (OPENFGA_STORE_ID + OPENFGA_AUTHORIZATION_MODEL_ID) for the worker
+// + demo-api to use.
+//
+// Idempotency note: this IS NOT idempotent. Each call creates a NEW
+// store and a NEW model. For the lab that's fine (you run this once
+// per fresh compose-up). A production-grade version would check
+// OPENFGA_STORE_ID and only create if absent. We add that in 8f when
+// `make dev-all` wants to be idempotent across reruns.
+func runFGAInit() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	apiURL := envOr("OPENFGA_API_URL", "http://localhost:8081")
+
+	c, err := fga.NewClient(fga.Config{
+		APIURL: apiURL,
+	})
+	if err != nil {
+		return fmt.Errorf("build FGA client: %w", err)
+	}
+
+	storeID, err := fga.CreateStore(ctx, c, "identity-provider")
+	if err != nil {
+		return fmt.Errorf("create store: %w", err)
+	}
+	fmt.Printf("created store: %s\n", storeID)
+
+	// Re-build the client with the store bound so WriteAuthorizationModel
+	// knows which store to target. The SDK uses the StoreId field from
+	// the ClientConfiguration, not from the method call.
+	c, err = fga.NewClient(fga.Config{
+		APIURL:  apiURL,
+		StoreID: storeID,
+	})
+	if err != nil {
+		return fmt.Errorf("rebuild client with store id: %w", err)
+	}
+
+	modelID, err := fga.UploadModelFromDSL(ctx, c, fga.ModelDSL())
+	if err != nil {
+		return fmt.Errorf("upload model: %w", err)
+	}
+	fmt.Printf("uploaded authorization model: %s\n", modelID)
+
+	fmt.Println()
+	fmt.Println("add these to /tmp/idp-env (or your .env):")
+	fmt.Printf("  export OPENFGA_STORE_ID=%s\n", storeID)
+	fmt.Printf("  export OPENFGA_AUTHORIZATION_MODEL_ID=%s\n", modelID)
+	return nil
 }
 
 // runGroups dispatches the `idp groups` subcommands. These are the
@@ -795,6 +868,7 @@ Subcommands:
   groups add-member <grp> <email>   add user (enqueues FGA outbox event)
   groups remove-member <grp> <email> remove user (enqueues FGA outbox event)
   groups list-members <group>       show group membership
+  fga init                          create OpenFGA store + upload model
   help                              print this message
 
 Env (shared):
