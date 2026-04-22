@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Grant access — identity-provider</title>
+    <style>
+        body { font-family: system-ui, -apple-system, sans-serif; max-width: 30rem; margin: 4rem auto; padding: 0 1rem; color: #222; }
+        h1 { margin-bottom: 0.5rem; font-size: 1.25rem; }
+        .meta { color: #666; font-size: 0.875rem; margin-bottom: 1.5rem; }
+        .scopes { border: 1px solid #ddd; border-radius: 6px; padding: 1rem; margin-bottom: 1.5rem; }
+        .scopes h2 { font-size: 0.875rem; color: #555; margin-top: 0; margin-bottom: 0.75rem; text-transform: uppercase; letter-spacing: 0.03em; }
+        .scopes ul { margin: 0; padding-left: 1.25rem; }
+        .scopes li { margin-bottom: 0.25rem; font-family: ui-monospace, Menlo, monospace; font-size: 0.875rem; }
+        .buttons { display: flex; gap: 0.75rem; }
+        button {
+            flex: 1; font-size: 1rem; padding: 0.6rem; border: 0; border-radius: 4px;
+            cursor: pointer;
+        }
+        button.approve { background: #2563eb; color: white; }
+        button.approve:hover { background: #1e40af; }
+        button.deny { background: #eee; color: #333; border: 1px solid #ccc; }
+        button.deny:hover { background: #ddd; }
+        .footer { margin-top: 2rem; font-size: 0.75rem; color: #888; }
+    </style>
+</head>
+<body>
+    <h1>{{ .ClientID }} wants to access your account</h1>
+    <div class="meta">Signed in as <strong>{{ .UserEmail }}</strong></div>
+
+    <div class="scopes">
+        <h2>Requested scopes</h2>
+        <ul>
+        {{- range .Scopes }}
+            <li>{{ . }}</li>
+        {{- end }}
+        </ul>
+    </div>
+
+    <form method="POST" action="/consent">
+        {{ .CSRFField }}
+        <input type="hidden" name="client_id" value="{{ .ClientID }}">
+        <input type="hidden" name="redirect_uri" value="{{ .RedirectURI }}">
+        <input type="hidden" name="state" value="{{ .State }}">
+        <input type="hidden" name="return_to" value="{{ .ReturnTo }}">
+        {{- range .Scopes }}
+        <input type="hidden" name="scope" value="{{ . }}">
+        {{- end }}
+        <div class="buttons">
+            <button class="deny" type="submit" name="decision" value="deny">Deny</button>
+            <button class="approve" type="submit" name="decision" value="approve">Approve</button>
+        </div>
+    </form>
+
+    <div class="footer">
+        identity-provider — subproject 2 of sysdesign-lab
+    </div>
+</body>
+</html>
