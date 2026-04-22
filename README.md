@@ -4,7 +4,7 @@
 
 **Language/stack:** Go 1.25, Postgres 16, OpenFGA (Apache 2.0 ReBAC engine)
 **Category:** interview-classic (OIDC) + skill-breadth (identity infra patterns)
-**Status:** scaffolding — design doc in place, implementation pending
+**Status:** in progress — OAuth 2.0 + OIDC protocol surface complete (layers 1–7). Outbox + FGA wiring pending (layer 8). 16 commits on `main`.
 **Repo:** local only (will push to GitHub when ready)
 
 ---

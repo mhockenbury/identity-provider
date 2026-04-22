@@ -16,10 +16,15 @@ Stateful HTTP server on `:8080`. Routes live in `internal/http`. Owns:
 - Consent tracking (`internal/consent`)
 - Outbox writer (`internal/outbox` — `EnqueueEvent(tx, event)` used by handlers that mutate identity)
 
-Session handling for login/consent: signed cookies, short TTL, HttpOnly, SameSite=Lax.
-Session data is session_id → user_id + login_time, stored in Postgres
-(`sessions` table — not shown in README ERD, added in migration). Could be
-in Redis but Postgres keeps the compose minimal.
+Session handling for login/consent: UNSIGNED cookies carrying only the session ID,
+HttpOnly, SameSite=Lax, 12h absolute TTL. Server resolves the ID via Postgres
+on every request — a forged ID fails the DB lookup, so "unforgeable session"
+holds without HMAC. Session data is session_id → user_id + expires_at, stored
+in Postgres (`sessions` table, migration 0001).
+
+Cookie signing is a deliberate simplification; a real IdP would HMAC-sign for
+defense in depth + to carry additional data without a DB hit. Tradeoff noted
+in `internal/users/sessions.go` package comment and `docs/tradeoffs.md`.
 
 ### outbox-worker (`cmd/outbox-worker`)
 Single binary. Loop:
@@ -46,7 +51,8 @@ Key behaviors:
 - Translation table from event_type → FGA ops lives in `internal/fga/translations.go`
 
 ### demo-api (`cmd/demo-api`)
-Separate binary on `:8081`. Deliberately minimal business logic; exists to
+Separate binary on `:8082` (OpenFGA's HTTP port occupies host :8081 per
+docker-compose.yml). Deliberately minimal business logic; exists to
 make the downstream-service lessons concrete.
 
 ```
