@@ -30,6 +30,8 @@
 //	OPENFGA_STORE_ID   store ID from `idp fga init` (required)
 //	OPENFGA_AUTHORIZATION_MODEL_ID  model ID from `idp fga init` (required)
 //	OPENFGA_API_TOKEN  optional; local OpenFGA runs without auth
+//	ALLOWED_ORIGINS    comma-separated CORS origins (e.g. http://localhost:5173
+//	                   for the Vite dev server). Empty → same-origin only.
 //	SHUTDOWN_GRACE     drain window on SIGTERM (default 15s)
 //	LOG_LEVEL          debug|info|warn|error (default info)
 package main
@@ -48,6 +50,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/go-chi/cors"
 	openfgaclient "github.com/openfga/go-sdk/client"
 
 	"github.com/mhockenbury/identity-provider/internal/fga"
@@ -128,11 +131,12 @@ func run() error {
 	}
 
 	router := newRouter(routerDeps{
-		verifier:    verifier,
-		fga:         &fgaCheckAdapter{client: fgaClient},
-		fgaRaw:      fgaClient,
-		store:       store,
-		requiredAud: cfg.requiredAud,
+		verifier:       verifier,
+		fga:            &fgaCheckAdapter{client: fgaClient},
+		fgaRaw:         fgaClient,
+		store:          store,
+		requiredAud:    cfg.requiredAud,
+		allowedOrigins: cfg.allowedOrigins,
 	})
 
 	srv := &http.Server{
@@ -147,6 +151,7 @@ func run() error {
 			"addr", cfg.httpAddr,
 			"trusted_issuers", cfg.trustedIssuers,
 			"required_aud", cfg.requiredAud,
+			"allowed_origins", cfg.allowedOrigins,
 			"fga_store", cfg.fga.StoreID,
 		)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -176,6 +181,7 @@ type config struct {
 	httpAddr       string
 	trustedIssuers []string
 	requiredAud    string
+	allowedOrigins []string
 	fga            fga.Config
 	shutdownGrace  time.Duration
 	logLevel       slog.Level
@@ -193,6 +199,19 @@ func loadConfig() (config, error) {
 		},
 		shutdownGrace: durEnv("SHUTDOWN_GRACE", 15*time.Second),
 		logLevel:      parseLogLevel(os.Getenv("LOG_LEVEL")),
+	}
+
+	// CORS. Comma-separated origins allowed to call docs-api from a
+	// browser. Empty → no CORS headers (same-origin only). Dev SPA runs
+	// on :5173 (Vite's default); prod would be whatever the SPA is
+	// deployed to.
+	if origins := strings.TrimSpace(os.Getenv("ALLOWED_ORIGINS")); origins != "" {
+		for _, o := range strings.Split(origins, ",") {
+			o = strings.TrimSpace(o)
+			if o != "" {
+				cfg.allowedOrigins = append(cfg.allowedOrigins, o)
+			}
+		}
 	}
 
 	issuers := strings.TrimSpace(os.Getenv("TRUSTED_ISSUERS"))
@@ -224,11 +243,12 @@ func loadConfig() (config, error) {
 // routerDeps is the set of dependencies the handlers need. Pulled out as
 // a struct so the handler files can accept a single parameter.
 type routerDeps struct {
-	verifier    *tokens.Verifier
-	fga         fgaChecker
-	fgaRaw      *openfgaclient.OpenFgaClient // for tuple writes (POST/DELETE docs)
-	store       *Store
-	requiredAud string
+	verifier       *tokens.Verifier
+	fga            fgaChecker
+	fgaRaw         *openfgaclient.OpenFgaClient // for tuple writes (POST/DELETE docs)
+	store          *Store
+	requiredAud    string
+	allowedOrigins []string
 }
 
 // fgaChecker is the narrow interface the handlers depend on. Lets tests
@@ -257,6 +277,20 @@ func newRouter(deps routerDeps) http.Handler {
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Recoverer)
 	r.Use(accessLog)
+
+	// CORS. Registered BEFORE auth so OPTIONS preflight requests aren't
+	// rejected as unauthenticated — the CORS middleware short-circuits
+	// OPTIONS before the chain gets to authenticate.
+	if len(deps.allowedOrigins) > 0 {
+		r.Use(cors.Handler(cors.Options{
+			AllowedOrigins:   deps.allowedOrigins,
+			AllowedMethods:   []string{"GET", "POST", "PATCH", "DELETE", "OPTIONS"},
+			AllowedHeaders:   []string{"Authorization", "Content-Type"},
+			ExposedHeaders:   []string{"WWW-Authenticate"},
+			AllowCredentials: false, // Bearer-only; we don't use cookies cross-origin
+			MaxAge:           300,
+		}))
+	}
 
 	r.Get("/healthz", healthHandler())
 

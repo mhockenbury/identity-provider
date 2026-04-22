@@ -102,6 +102,99 @@ func seedStoreForTests() *Store {
 	return s
 }
 
+// --- permission enrichment ---
+//
+// Verifies the most-privileged-first resolution: a user with owner+editor
+// tuples is reported as "owner". A user with only viewer is "viewer".
+
+func TestListDocs_ReportsHighestPermissionTier(t *testing.T) {
+	store := seedStoreForTests()
+	fga := newFakeChecker()
+	// d1: user is owner (also editor, which is implied + tested)
+	fga.allow("user:u1", "owner", "document:d1")
+	// d2: user is only editor
+	fga.allow("user:u1", "editor", "document:d2")
+	// d3: user is only viewer
+	fga.allow("user:u1", "viewer", "document:d3")
+
+	srv := newTestRouter(t, "u1", "read:docs", store, fga)
+	w, _ := doGet(t, srv, "/docs")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d", w.Code)
+	}
+
+	var body struct {
+		Docs []struct {
+			ID         string `json:"id"`
+			Permission string `json:"permission"`
+		} `json:"docs"`
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &body)
+
+	wantPerm := map[string]string{"d1": "owner", "d2": "editor", "d3": "viewer"}
+	for _, d := range body.Docs {
+		if wantPerm[d.ID] != d.Permission {
+			t.Errorf("doc %s: got permission=%q, want %q", d.ID, d.Permission, wantPerm[d.ID])
+		}
+	}
+	if len(body.Docs) != 3 {
+		t.Errorf("got %d docs, want 3", len(body.Docs))
+	}
+}
+
+func TestGetDoc_ReportsPermissionTier(t *testing.T) {
+	store := seedStoreForTests()
+	fga := newFakeChecker()
+	fga.allow("user:u1", "editor", "document:d1")
+
+	srv := newTestRouter(t, "u1", "read:docs", store, fga)
+	w, _ := doGet(t, srv, "/docs/d1")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d", w.Code)
+	}
+	var body struct {
+		ID         string `json:"id"`
+		Permission string `json:"permission"`
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &body)
+	if body.Permission != "editor" {
+		t.Errorf("permission = %q, want editor", body.Permission)
+	}
+}
+
+// --- listFolders ---
+
+func TestListFolders_FiltersAndTiers(t *testing.T) {
+	store := seedStoreForTests()
+	fga := newFakeChecker()
+	fga.allow("user:u1", "owner", "folder:f1")
+	fga.allow("user:u1", "viewer", "folder:f2")
+	// no permission on any other folder
+
+	srv := newTestRouter(t, "u1", "read:docs", store, fga)
+	w, _ := doGet(t, srv, "/folders")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d", w.Code)
+	}
+	var body struct {
+		Folders []struct {
+			ID         string `json:"id"`
+			Permission string `json:"permission"`
+		} `json:"folders"`
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &body)
+	if len(body.Folders) != 2 {
+		t.Fatalf("got %d folders, want 2", len(body.Folders))
+	}
+	tiers := map[string]string{}
+	for _, f := range body.Folders {
+		tiers[f.ID] = f.Permission
+	}
+	if tiers["f1"] != "owner" || tiers["f2"] != "viewer" {
+		t.Errorf("unexpected tiers: %+v", tiers)
+	}
+}
+
 // --- listDocs ---
 
 func TestListDocs_FiltersByViewer(t *testing.T) {

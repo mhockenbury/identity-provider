@@ -14,6 +14,7 @@ require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/envoyproxy/protoc-gen-validate v1.3.3 // indirect
 	github.com/go-chi/chi/v5 v5.2.5 // indirect
+	github.com/go-chi/cors v1.2.2 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/gorilla/csrf v1.7.3 // indirect

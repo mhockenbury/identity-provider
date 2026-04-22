@@ -99,6 +99,17 @@ func (s *Store) GetFolder(id string) (Folder, bool) {
 	return *f, true
 }
 
+// ListFolders returns all folders in insertion-agnostic order.
+func (s *Store) ListFolders() []Folder {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]Folder, 0, len(s.folders))
+	for _, f := range s.folders {
+		out = append(out, *f)
+	}
+	return out
+}
+
 // ListDocs returns all docs in insertion-agnostic order. Callers that
 // need filtering by FGA do that themselves.
 func (s *Store) ListDocs() []Document {

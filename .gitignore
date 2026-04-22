@@ -10,3 +10,5 @@ vendor/
 .idea/
 .vscode/
 *.log
+node_modules
+web/node_modules

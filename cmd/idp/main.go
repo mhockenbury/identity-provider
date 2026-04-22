@@ -24,6 +24,7 @@
 //   JWT_SIGNING_KEY_ENCRYPTION_KEY   required for keys subcommand + serve; 64 hex chars
 //   CSRF_KEY                         required for serve; 64 hex chars
 //   ISSUER_URL                       serve only; issuer string baked into tokens (default http://localhost:8080)
+//   ALLOWED_ORIGINS                  serve only; comma-separated CORS origins for /.well-known/*, /token, /userinfo
 //   HTTP_ADDR                        serve only; listen address (default :8080)
 //   SHUTDOWN_GRACE                   serve only; drain window on SIGTERM (default 15s)
 //   LOG_LEVEL                        debug|info|warn|error (default info)
@@ -804,8 +805,9 @@ func runServe() error {
 		LoginPOST:   myhttp.LoginPOST(loginCfg),
 		ConsentGET:  myhttp.ConsentGET(consentCfg),
 		ConsentPOST: myhttp.ConsentPOST(consentCfg),
-		Token:       oauth.Token(tokenCfg),
-		UserInfo:    oidc.UserInfoHandler(userInfoCfg),
+		Token:          oauth.Token(tokenCfg),
+		UserInfo:       oidc.UserInfoHandler(userInfoCfg),
+		AllowedOrigins: cfg.allowedOrigins,
 	})
 
 	srv := &nethttp.Server{
@@ -817,7 +819,11 @@ func runServe() error {
 	// Run ListenAndServe in a goroutine so main can wait on the signal.
 	serverErr := make(chan error, 1)
 	go func() {
-		slog.Info("http server listening", "addr", cfg.httpAddr, "issuer", cfg.issuerURL)
+		slog.Info("http server listening",
+			"addr", cfg.httpAddr,
+			"issuer", cfg.issuerURL,
+			"allowed_origins", cfg.allowedOrigins,
+		)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, nethttp.ErrServerClosed) {
 			serverErr <- err
 		}
@@ -845,6 +851,7 @@ type serveConfig struct {
 	csrfKeyHex      string
 	issuerURL       string
 	httpAddr        string
+	allowedOrigins  []string
 	accessTokenTTL  time.Duration
 	idTokenTTL      time.Duration
 	refreshTokenTTL time.Duration
@@ -918,6 +925,18 @@ func loadServeConfig() (serveConfig, error) {
 
 	c.issuerURL = envOr("ISSUER_URL", "http://localhost:8080")
 	c.httpAddr = envOr("HTTP_ADDR", ":8080")
+
+	// CORS origins for browser OIDC clients (discovery, token, userinfo).
+	// Empty → no CORS headers. Example: http://localhost:5173 for the
+	// Vite dev server.
+	if origins := strings.TrimSpace(os.Getenv("ALLOWED_ORIGINS")); origins != "" {
+		for _, o := range strings.Split(origins, ",") {
+			o = strings.TrimSpace(o)
+			if o != "" {
+				c.allowedOrigins = append(c.allowedOrigins, o)
+			}
+		}
+	}
 
 	var err error
 
@@ -1141,6 +1160,7 @@ Env (shared):
 Env (serve only):
   CSRF_KEY                         32 bytes hex-encoded (required)
   ISSUER_URL                       default http://localhost:8080
+  ALLOWED_ORIGINS                  CORS origins for browser OIDC clients (e.g. http://localhost:5173)
   HTTP_ADDR                        default :8080
   SHUTDOWN_GRACE                   default 15s
   LOG_LEVEL                        debug|info|warn|error (default info)`)

@@ -187,8 +187,17 @@ open http://localhost:3000
 | `OPENFGA_API_URL` | `http://localhost:8081` | |
 | `OPENFGA_STORE_ID` | same as worker | |
 | `OPENFGA_AUTHORIZATION_MODEL_ID` | same as worker | |
+| `ALLOWED_ORIGINS` | (empty) | Comma-separated CORS origins; e.g. `http://localhost:5173` for Vite dev |
 | `SHUTDOWN_GRACE` | `15s` | |
 | `LOG_LEVEL` | `info` | debug\|info\|warn\|error |
+
+### web/ (stretch — Vite + React SPA)
+
+- Mono-frontend: `/` = docs product, `/admin` = IdP admin (scope-gated).
+- Stack: Vite + React 18 + TypeScript + Tailwind + React Router + TanStack Query + `react-oidc-context` + react-hook-form.
+- **Token storage**: in-memory only. Reload triggers silent re-auth via the IdP session cookie + refresh token flow. No `localStorage` / `sessionStorage` for tokens (XSS exposure).
+- **Dev proxy** in `vite.config.ts` rewrites `/api/docs` → `:8083/` and `/api/admin` → `:8080/admin/api/` so the SPA calls same-origin and we dodge CORS in dev.
+- **Prod / non-proxied dev**: docs-api + IdP admin API honor `ALLOWED_ORIGINS` via `go-chi/cors`.
 
 ## References
 

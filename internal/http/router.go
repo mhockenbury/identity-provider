@@ -14,6 +14,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/go-chi/cors"
 
 	"github.com/mhockenbury/identity-provider/internal/oidc"
 	"github.com/mhockenbury/identity-provider/internal/tokens"
@@ -59,6 +60,12 @@ type RouterConfig struct {
 	// Layer 7: /userinfo. Bearer-authenticated, no session, no CSRF.
 	// OIDC Core §5.3.
 	UserInfo http.HandlerFunc
+
+	// AllowedOrigins enables CORS on the browser-consumable, no-session
+	// endpoints: /.well-known/*, /token, /userinfo. Empty → no CORS
+	// headers. `/authorize` and `/login` are top-level navigations, not
+	// XHR calls, so they don't need CORS.
+	AllowedOrigins []string
 }
 
 // requestTimeout bounds per-request work end-to-end. The IdP has no
@@ -83,9 +90,33 @@ func New(cfg RouterConfig) http.Handler {
 	r.Use(accessLog)
 	r.Use(middleware.Timeout(requestTimeout))
 
+	// Discovery + JWKS are read by browser OIDC clients (via XHR), so
+	// they need CORS. Grouped with /token + /userinfo under one CORS
+	// middleware instance. /authorize + /login stay outside because
+	// they're top-level navigations (no CORS needed).
+	var corsMW func(http.Handler) http.Handler
+	if len(cfg.AllowedOrigins) > 0 {
+		corsMW = cors.Handler(cors.Options{
+			AllowedOrigins:   cfg.AllowedOrigins,
+			AllowedMethods:   []string{"GET", "POST", "OPTIONS"},
+			AllowedHeaders:   []string{"Authorization", "Content-Type"},
+			ExposedHeaders:   []string{"WWW-Authenticate"},
+			AllowCredentials: false,
+			MaxAge:           300,
+		})
+	}
+
 	// Discovery + JWKS. Both are read-only, no auth.
-	r.Get("/.well-known/openid-configuration", oidc.Handler(cfg.Discovery).ServeHTTP)
-	r.Get("/.well-known/jwks.json", oidc.JWKSHandler(cfg.KeyStore).ServeHTTP)
+	discoveryHandler := oidc.Handler(cfg.Discovery).ServeHTTP
+	jwksHandler := oidc.JWKSHandler(cfg.KeyStore).ServeHTTP
+	if corsMW != nil {
+		discoveryHandler = corsMW(http.HandlerFunc(discoveryHandler)).ServeHTTP
+		jwksHandler = corsMW(http.HandlerFunc(jwksHandler)).ServeHTTP
+	}
+	r.Get("/.well-known/openid-configuration", discoveryHandler)
+	r.Options("/.well-known/openid-configuration", discoveryHandler)
+	r.Get("/.well-known/jwks.json", jwksHandler)
+	r.Options("/.well-known/jwks.json", jwksHandler)
 
 	// Liveness + dependency probe. Intentionally lenient: returns 503
 	// on first failure so container orchestrators can react, but
@@ -149,13 +180,26 @@ func New(cfg RouterConfig) http.Handler {
 
 	// Layer 6: /token. Back-channel — no session, no CSRF. Client
 	// authentication happens inside the handler via Basic/form fields.
+	// CORS-enabled so browser SPAs can POST the code/refresh exchange
+	// directly.
 	if cfg.Token != nil {
-		r.Post("/token", cfg.Token)
+		tokenHandler := cfg.Token
+		if corsMW != nil {
+			tokenHandler = corsMW(cfg.Token).ServeHTTP
+		}
+		r.Post("/token", tokenHandler)
+		r.Options("/token", tokenHandler)
 	}
 
 	// Layer 7: /userinfo. Bearer-authenticated, no session, no CSRF.
+	// CORS-enabled so browser SPAs can read the userinfo claims.
 	if cfg.UserInfo != nil {
-		r.Get("/userinfo", cfg.UserInfo)
+		userinfoHandler := cfg.UserInfo
+		if corsMW != nil {
+			userinfoHandler = corsMW(cfg.UserInfo).ServeHTTP
+		}
+		r.Get("/userinfo", userinfoHandler)
+		r.Options("/userinfo", userinfoHandler)
 	}
 
 	return r

@@ -1,6 +1,6 @@
 export PATH := $(PATH):/usr/local/go/bin:$(HOME)/go/bin
 
-.PHONY: up down migrate run-idp run-outbox-worker run-docs-api test tidy build fmt vet
+.PHONY: up down migrate run-idp run-outbox-worker run-docs-api test tidy build fmt vet web-install web-dev web-build
 .PHONY: up-app down-app restart-app status-app logs-idp logs-outbox-worker logs-docs-api up-all down-all _wait-deps check-deps
 .PHONY: dev-secrets dev-reset dev-key dev-user dev-all dev-serve oauth-url dev-flow check-deps-idp up-idp-only
 
@@ -28,7 +28,10 @@ run-docs-api:
 	go run ./cmd/docs-api
 
 test:
-	go test ./...
+	@# web/node_modules contains a third-party package that ships a Go
+	@# file (flatted) — `go test ./...` would walk into it. Explicitly
+	@# target only our Go module roots.
+	go test ./cmd/... ./internal/...
 
 vet:
 	go vet ./...
@@ -43,6 +46,16 @@ build:
 	go build -o bin/idp ./cmd/idp
 	go build -o bin/outbox-worker ./cmd/outbox-worker
 	go build -o bin/docs-api ./cmd/docs-api
+
+# --- web (Vite + React SPA) ---
+web-install:
+	cd web && npm install
+
+web-dev:
+	cd web && npm run dev
+
+web-build:
+	cd web && npm run build
 
 # --- App process lifecycle (background) ---
 # Same pattern as url-shortener. Three processes: idp, outbox-worker, docs-api.

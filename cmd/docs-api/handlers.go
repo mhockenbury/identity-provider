@@ -34,9 +34,42 @@ import (
 // routerDeps — adds Store and the raw FGA client (so POST /docs can
 // write the owner tuple). Built in main.go.
 type handlerDeps struct {
-	store      *Store
-	fga        fgaChecker
+	store        *Store
+	fga          fgaChecker
 	fgaRawClient *openfgaclient.OpenFgaClient // for tuple writes from POST/DELETE
+}
+
+// docResponse is the enriched JSON shape returned to clients. Wraps
+// Document with the caller's permission tier on that doc so the SPA
+// can show/hide Edit + Delete buttons without a round trip.
+//
+// Permission is one of: "owner" | "editor" | "viewer". Computed via
+// up-to-3 FGA Checks per doc, most-privileged-first for early-out.
+type docResponse struct {
+	Document
+	Permission string `json:"permission"`
+}
+
+type folderResponse struct {
+	Folder
+	Permission string `json:"permission"`
+}
+
+// resolvePermission returns the highest tier the user has on an object,
+// or "" if none. Short-circuits on the first positive check — so a user
+// who's owner only pays 1 FGA Check round-trip, not 3.
+func (h handlerDeps) resolvePermission(r *http.Request, user, objectType, objectID string) (string, error) {
+	obj := objectType + ":" + objectID
+	for _, rel := range []string{"owner", "editor", "viewer"} {
+		ok, err := h.fga.Check(r.Context(), user, rel, obj)
+		if err != nil {
+			return "", err
+		}
+		if ok {
+			return rel, nil
+		}
+	}
+	return "", nil
 }
 
 // registerResourceRoutes mounts the doc + folder handlers. Called from
@@ -45,6 +78,7 @@ func registerResourceRoutes(r chi.Router, h handlerDeps) {
 	// Reads — require read:docs.
 	r.With(requireScope("read:docs")).Get("/docs", h.listDocs)
 	r.With(requireScope("read:docs")).Get("/docs/{id}", h.getDoc)
+	r.With(requireScope("read:docs")).Get("/folders", h.listFolders)
 	r.With(requireScope("read:docs")).Get("/folders/{id}", h.getFolder)
 	r.With(requireScope("read:docs")).Get("/folders/{id}/docs", h.listFolderDocs)
 
@@ -56,29 +90,31 @@ func registerResourceRoutes(r chi.Router, h handlerDeps) {
 
 // --- handlers ---
 
-// listDocs returns every doc the caller can view. O(N) FGA checks;
+// listDocs returns every doc the caller can view, enriched with the
+// caller's permission tier on each. O(N × up-to-3) FGA checks;
 // fine for seed-scale. Real production would use OpenFGA's ListObjects
-// to filter at the authz tier.
+// to filter at the authz tier first, then batch-Check for tiers.
 func (h handlerDeps) listDocs(w http.ResponseWriter, r *http.Request) {
 	user := userFromClaims(claimsFromCtx(r.Context()))
 	all := h.store.ListDocs()
-	visible := make([]Document, 0, len(all))
+	visible := make([]docResponse, 0, len(all))
 	for _, d := range all {
-		ok, err := h.fga.Check(r.Context(), user, "viewer", "document:"+d.ID)
+		perm, err := h.resolvePermission(r, user, "document", d.ID)
 		if err != nil {
 			writeError(w, http.StatusBadGateway, "authz_backend", err.Error())
 			return
 		}
-		if ok {
-			visible = append(visible, d)
+		if perm == "" {
+			continue
 		}
+		visible = append(visible, docResponse{Document: d, Permission: perm})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"docs": visible})
 }
 
-// getDoc returns one doc if the caller has viewer on it. 404 before
-// 403: leaking "this doc exists but you can't see it" is worse than
-// "this doc doesn't exist."
+// getDoc returns one doc if the caller has viewer on it, enriched with
+// the caller's permission tier. 404 before 403: leaking "this doc
+// exists but you can't see it" is worse than "this doc doesn't exist."
 func (h handlerDeps) getDoc(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	doc, ok := h.store.GetDoc(id)
@@ -87,20 +123,40 @@ func (h handlerDeps) getDoc(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	user := userFromClaims(claimsFromCtx(r.Context()))
-	allowed, err := h.fga.Check(r.Context(), user, "viewer", "document:"+id)
+	perm, err := h.resolvePermission(r, user, "document", id)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "authz_backend", err.Error())
 		return
 	}
-	if !allowed {
+	if perm == "" {
 		// Intentionally 404 — "no such doc from your perspective."
 		writeError(w, http.StatusNotFound, "not_found", "document not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, doc)
+	writeJSON(w, http.StatusOK, docResponse{Document: doc, Permission: perm})
 }
 
-// getFolder: viewer on the folder.
+// listFolders returns every folder the caller can view, with their
+// permission tier on each. Used by the SPA's sidebar.
+func (h handlerDeps) listFolders(w http.ResponseWriter, r *http.Request) {
+	user := userFromClaims(claimsFromCtx(r.Context()))
+	all := h.store.ListFolders()
+	visible := make([]folderResponse, 0, len(all))
+	for _, f := range all {
+		perm, err := h.resolvePermission(r, user, "folder", f.ID)
+		if err != nil {
+			writeError(w, http.StatusBadGateway, "authz_backend", err.Error())
+			return
+		}
+		if perm == "" {
+			continue
+		}
+		visible = append(visible, folderResponse{Folder: f, Permission: perm})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"folders": visible})
+}
+
+// getFolder: viewer on the folder, response enriched with tier.
 func (h handlerDeps) getFolder(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	f, ok := h.store.GetFolder(id)
@@ -109,21 +165,22 @@ func (h handlerDeps) getFolder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	user := userFromClaims(claimsFromCtx(r.Context()))
-	allowed, err := h.fga.Check(r.Context(), user, "viewer", "folder:"+id)
+	perm, err := h.resolvePermission(r, user, "folder", id)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "authz_backend", err.Error())
 		return
 	}
-	if !allowed {
+	if perm == "" {
 		writeError(w, http.StatusNotFound, "not_found", "folder not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, f)
+	writeJSON(w, http.StatusOK, folderResponse{Folder: f, Permission: perm})
 }
 
-// listFolderDocs: viewer on the folder AND per-doc Check (so a user
-// who's viewer on the folder but not on some specific doc — possible
-// with tighter-than-inherited explicit rules — doesn't see it).
+// listFolderDocs: viewer on the folder AND per-doc permission check
+// (a user viewer on the folder but not on some specific doc —
+// possible with tighter-than-inherited explicit rules — shouldn't see it).
+// Each returned doc carries its own permission tier.
 func (h handlerDeps) listFolderDocs(w http.ResponseWriter, r *http.Request) {
 	folderID := chi.URLParam(r, "id")
 	if _, ok := h.store.GetFolder(folderID); !ok {
@@ -132,27 +189,28 @@ func (h handlerDeps) listFolderDocs(w http.ResponseWriter, r *http.Request) {
 	}
 	user := userFromClaims(claimsFromCtx(r.Context()))
 
-	folderOK, err := h.fga.Check(r.Context(), user, "viewer", "folder:"+folderID)
+	folderPerm, err := h.resolvePermission(r, user, "folder", folderID)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "authz_backend", err.Error())
 		return
 	}
-	if !folderOK {
+	if folderPerm == "" {
 		writeError(w, http.StatusNotFound, "not_found", "folder not found")
 		return
 	}
 
 	docs := h.store.ListFolderDocs(folderID)
-	visible := make([]Document, 0, len(docs))
+	visible := make([]docResponse, 0, len(docs))
 	for _, d := range docs {
-		ok, err := h.fga.Check(r.Context(), user, "viewer", "document:"+d.ID)
+		perm, err := h.resolvePermission(r, user, "document", d.ID)
 		if err != nil {
 			writeError(w, http.StatusBadGateway, "authz_backend", err.Error())
 			return
 		}
-		if ok {
-			visible = append(visible, d)
+		if perm == "" {
+			continue
 		}
+		visible = append(visible, docResponse{Document: d, Permission: perm})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"docs": visible})
 }
