@@ -8,7 +8,11 @@ INSERT INTO clients (id, secret_hash, redirect_uris, allowed_grants, allowed_sco
 VALUES (
     'localdev',
     NULL,  -- public client; PKCE-only
-    ARRAY['http://localhost:5173/callback', 'http://localhost:8080/debug/callback'],
+    -- The SPA uses /callback for auth-code redirects and / for
+    -- post-logout redirects. Both must be registered because the
+    -- logout handler validates post_logout_redirect_uri against the
+    -- same redirect_uris list (lab shortcut; see docs/tradeoffs.md).
+    ARRAY['http://localhost:5173/callback', 'http://localhost:5173/', 'http://localhost:8080/debug/callback'],
     ARRAY['authorization_code', 'refresh_token'],
     ARRAY['openid', 'profile', 'email', 'read:docs', 'write:docs', 'admin:users'],
     TRUE

@@ -784,6 +784,7 @@ func runServe() error {
 	logoutCfg := myhttp.LogoutConfig{
 		Sessions: sessionStore,
 		Secure:   secure,
+		Clients:  clientLookup,
 	}
 
 	router := myhttp.New(myhttp.RouterConfig{

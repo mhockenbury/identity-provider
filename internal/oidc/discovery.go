@@ -12,8 +12,8 @@ import (
 //
 // We emit a conservative subset — only the fields we actually support.
 // Extending this is safe (clients ignore unknown fields) but we avoid
-// claiming support for things we haven't built: no end_session_endpoint,
-// no registration_endpoint, no revocation_endpoint, no introspection.
+// claiming support for things we haven't built: no registration_endpoint,
+// no revocation_endpoint, no introspection.
 //
 // Content-Type MUST be application/json per §4.1 — we set it in the
 // handler, not here. Cache-Control should be set to something sensible
@@ -31,6 +31,7 @@ type Discovery struct {
 	// OPTIONAL but standard enough that omitting them causes client-side
 	// warnings in mainstream libraries.
 	UserinfoEndpoint                  string   `json:"userinfo_endpoint,omitempty"`
+	EndSessionEndpoint                string   `json:"end_session_endpoint,omitempty"`
 	ScopesSupported                   []string `json:"scopes_supported,omitempty"`
 	TokenEndpointAuthMethodsSupported []string `json:"token_endpoint_auth_methods_supported,omitempty"`
 	GrantTypesSupported               []string `json:"grant_types_supported,omitempty"`
@@ -61,6 +62,7 @@ func BuildDiscovery(cfg DiscoveryConfig) Discovery {
 		AuthorizationEndpoint: iss + "/authorize",
 		TokenEndpoint:         iss + "/token",
 		UserinfoEndpoint:      iss + "/userinfo",
+		EndSessionEndpoint:    iss + "/logout",
 		JWKSURI:               iss + "/.well-known/jwks.json",
 
 		// We only support code flow; implicit and hybrid are deprecated
