@@ -2,6 +2,7 @@ export PATH := $(PATH):/usr/local/go/bin:$(HOME)/go/bin
 
 .PHONY: up down migrate run-idp run-outbox-worker run-demo-api test tidy build fmt vet
 .PHONY: up-app down-app restart-app status-app logs-idp logs-outbox-worker logs-demo-api up-all down-all _wait-deps check-deps
+.PHONY: dev-secrets dev-reset dev-key dev-user dev-all dev-serve oauth-url dev-flow check-deps-idp up-idp-only
 
 up:
 	docker compose up -d
@@ -141,3 +142,119 @@ _wait-deps:
 	done; \
 	echo "ERROR: compose services did not become healthy within 60s"; \
 	exit 1
+
+# --- Dev commands ---
+#
+# Quick iteration on the IdP without hand-crafting SQL or remembering
+# env shapes. Everything composes from the real CLI subcommands + psql;
+# no hidden magic.
+#
+# Secrets (KEK + CSRF key) land in /tmp/idp-env which `make dev-serve`
+# sources. /tmp is wiped on reboot — run `make dev-secrets FORCE=1` to
+# regenerate, or `make dev-all` which regenerates if absent.
+#
+# `make dev-all` is the all-in-one: secrets + reset + seed key + seed user.
+# After that, `make dev-serve` runs the IdP with everything ready.
+
+DEV_ENV_FILE      := /tmp/idp-env
+DEV_DATABASE_URL  := postgres://idp:idp@localhost:5434/idp?sslmode=disable
+DEV_USER_EMAIL    := smoke-alice@example.com
+DEV_USER_PASSWORD := correct-horse-battery-staple
+DEV_CLIENT_ID     := localdev
+
+# Write fresh KEK + CSRF keys to /tmp/idp-env. Idempotent: skipped if
+# file exists unless FORCE=1 is set.
+dev-secrets:
+	@if [ -f "$(DEV_ENV_FILE)" ] && [ "$(FORCE)" != "1" ]; then \
+		echo "$(DEV_ENV_FILE) exists (use FORCE=1 to regenerate)"; \
+		exit 0; \
+	fi; \
+	kek=$$(head -c 32 /dev/urandom | xxd -p -c 64); \
+	csrf=$$(head -c 32 /dev/urandom | xxd -p -c 64); \
+	{ \
+		echo "export DATABASE_URL=$(DEV_DATABASE_URL)"; \
+		echo "export JWT_SIGNING_KEY_ENCRYPTION_KEY=$$kek"; \
+		echo "export CSRF_KEY=$$csrf"; \
+	} > "$(DEV_ENV_FILE)"; \
+	echo "wrote $(DEV_ENV_FILE)"
+
+# Wipe test state from the IdP database. Keeps the schema.
+# Re-seeds the localdev client so /authorize works afterward.
+#
+# Safe to re-run any time — truncates rows only. DOES delete signing
+# keys; after reset you need `make dev-key` again (or `make dev-all`).
+dev-reset: check-deps-idp
+	@echo "==> truncating IdP state (keeps schema)"
+	@docker compose exec -T postgres-idp psql -v ON_ERROR_STOP=1 -U idp -d idp -c "TRUNCATE TABLE authorization_codes, refresh_tokens, consents, sessions, signing_keys, fga_outbox, group_memberships, groups, users, clients RESTART IDENTITY CASCADE;"
+	@echo "==> seeding localdev client"
+	@docker compose exec -T postgres-idp psql -v ON_ERROR_STOP=1 -U idp -d idp < scripts/seed_client.sql
+	@echo "ok"
+
+# Generate + activate a signing key IF none is currently active.
+# Idempotent: no-op when an active key exists.
+dev-key: build check-deps-idp
+	@. "$(DEV_ENV_FILE)" 2>/dev/null && { \
+		active=$$(./bin/idp keys list 2>/dev/null | awk '$$3=="active" {print $$1; exit}'); \
+		if [ -n "$$active" ]; then \
+			echo "active key already present: $$active"; \
+			exit 0; \
+		fi; \
+		pending=$$(./bin/idp keys list 2>/dev/null | awk '$$3=="pending" {print $$1; exit}'); \
+		if [ -z "$$pending" ]; then \
+			./bin/idp keys generate; \
+			pending=$$(./bin/idp keys list 2>/dev/null | awk '$$3=="pending" {print $$1; exit}'); \
+		fi; \
+		./bin/idp keys activate "$$pending"; \
+	} || { echo "ERROR: make sure $(DEV_ENV_FILE) exists (run: make dev-secrets)"; exit 1; }
+
+# Create the default dev user. Idempotent — skips if the email already exists.
+dev-user: build check-deps-idp
+	@. "$(DEV_ENV_FILE)" 2>/dev/null && { \
+		if ./bin/idp users list 2>/dev/null | grep -q "$(DEV_USER_EMAIL)"; then \
+			echo "user $(DEV_USER_EMAIL) already exists"; \
+			exit 0; \
+		fi; \
+		./bin/idp users create "$(DEV_USER_EMAIL)" "$(DEV_USER_PASSWORD)"; \
+	} || { echo "ERROR: make sure $(DEV_ENV_FILE) exists (run: make dev-secrets)"; exit 1; }
+
+# All-in-one: secrets + reset + key + user. The "I haven't touched this
+# in a week, just make it work" button.
+dev-all: dev-secrets dev-reset dev-key dev-user
+	@echo
+	@echo "=== dev environment ready ==="
+	@echo "  user:     $(DEV_USER_EMAIL)"
+	@echo "  password: $(DEV_USER_PASSWORD)"
+	@echo "  client:   $(DEV_CLIENT_ID)"
+	@echo
+	@echo "next: make dev-serve   (start the IdP in foreground)"
+	@echo "      make oauth-url   (print a ready-to-paste /authorize URL)"
+	@echo "      make dev-flow    (drive the full auth-code flow via curl)"
+
+# Run the IdP in the foreground with env from /tmp/idp-env.
+# (Use up-app/down-app for backgrounded operation.)
+dev-serve: build check-deps-idp
+	@. "$(DEV_ENV_FILE)" && ./bin/idp serve
+
+# Print a ready-to-paste /authorize URL with a fresh PKCE challenge.
+# Prints the code_verifier too — you'll need it when exchanging the
+# code for a token at /token.
+oauth-url:
+	@verifier=$$(head -c 32 /dev/urandom | base64 | tr -d '=/+' | head -c 43); \
+	challenge=$$(printf "%s" "$$verifier" | openssl dgst -binary -sha256 | base64 | tr -d '=' | tr '+/' '-_'); \
+	state=$$(head -c 12 /dev/urandom | xxd -p); \
+	nonce=$$(head -c 12 /dev/urandom | xxd -p); \
+	echo "# code_verifier (keep for /token exchange):"; \
+	echo "$$verifier"; \
+	echo; \
+	echo "# /authorize URL (paste into browser):"; \
+	echo "http://localhost:8080/authorize?response_type=code&client_id=$(DEV_CLIENT_ID)&redirect_uri=http%3A%2F%2Flocalhost%3A5173%2Fcallback&scope=openid+read%3Adocs&state=$$state&code_challenge=$$challenge&code_challenge_method=S256&nonce=$$nonce"
+
+# Drive the full auth-code flow via curl: GET /authorize → /login →
+# POST /login → back to /authorize → /consent → POST approve →
+# back to /authorize → redirect to client with code.
+#
+# Requires: IdP running (make dev-serve in another terminal).
+# Captures cookies in a jar so session + CSRF work across requests.
+dev-flow:
+	@echo "=== driving OAuth auth-code flow via curl ==="
+	@scripts/dev_flow.sh

@@ -1,15 +1,18 @@
 // The idp binary hosts both the HTTP server and the admin CLI.
 //
 // Subcommands:
-//   idp serve               — run the OIDC HTTP server
-//   idp keys generate       — create a new PENDING signing key
-//   idp keys list           — show all signing keys with status
-//   idp keys activate <kid> — transition PENDING → ACTIVE (one at a time)
-//   idp keys retire   <kid> — transition ACTIVE → RETIRED
+//   idp serve                          — run the OIDC HTTP server
+//   idp keys generate                  — create a new PENDING signing key
+//   idp keys list                      — show all signing keys with status
+//   idp keys activate <kid>            — transition PENDING → ACTIVE
+//   idp keys retire   <kid>            — transition ACTIVE → RETIRED
+//   idp users create <email> <pass>    — create a user (argon2id-hashed password)
+//   idp users list                     — list all users
 //
 // Env vars:
 //   DATABASE_URL                     required; e.g. postgres://idp:idp@localhost:5434/idp?sslmode=disable
-//   JWT_SIGNING_KEY_ENCRYPTION_KEY   required; 64 hex chars, wraps signing keys at rest
+//   JWT_SIGNING_KEY_ENCRYPTION_KEY   required for keys subcommand + serve; 64 hex chars
+//   CSRF_KEY                         required for serve; 64 hex chars
 //   ISSUER_URL                       serve only; issuer string baked into tokens (default http://localhost:8080)
 //   HTTP_ADDR                        serve only; listen address (default :8080)
 //   SHUTDOWN_GRACE                   serve only; drain window on SIGTERM (default 15s)
@@ -29,11 +32,16 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/mhockenbury/identity-provider/internal/clients"
+	"github.com/mhockenbury/identity-provider/internal/consent"
 	myhttp "github.com/mhockenbury/identity-provider/internal/http"
+	"github.com/mhockenbury/identity-provider/internal/oauth"
 	"github.com/mhockenbury/identity-provider/internal/oidc"
 	"github.com/mhockenbury/identity-provider/internal/tokens"
+	"github.com/mhockenbury/identity-provider/internal/users"
 )
 
 func main() {
@@ -53,11 +61,85 @@ func run(args []string) error {
 		return runServe()
 	case "keys":
 		return runKeys(args[1:])
+	case "users":
+		return runUsers(args[1:])
 	case "-h", "--help", "help":
 		printUsage()
 		return nil
 	default:
 		return usageErr(fmt.Sprintf("unknown subcommand %q", args[0]))
+	}
+}
+
+// runUsers dispatches the `idp users` subcommands. Users subcommands
+// don't need the KEK — password hashing is inside the users package.
+func runUsers(args []string) error {
+	if len(args) < 1 {
+		return usageErr("users: no subcommand")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		return fmt.Errorf("DATABASE_URL not set")
+	}
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		return fmt.Errorf("pgxpool.New: %w", err)
+	}
+	defer pool.Close()
+	if err := pool.Ping(ctx); err != nil {
+		return fmt.Errorf("postgres ping: %w", err)
+	}
+	store := users.NewPostgresStore(pool)
+
+	switch args[0] {
+	case "create":
+		if len(args) < 3 {
+			return usageErr("users create: need <email> <password>")
+		}
+		email, password := args[1], args[2]
+		u, err := store.Create(ctx, email, password)
+		if err != nil {
+			return fmt.Errorf("create: %w", err)
+		}
+		fmt.Printf("created user: id=%s email=%s\n", u.ID, u.Email)
+		return nil
+
+	case "list":
+		const q = `SELECT id, email, created_at FROM users ORDER BY created_at DESC`
+		rows, err := pool.Query(ctx, q)
+		if err != nil {
+			return fmt.Errorf("query users: %w", err)
+		}
+		defer rows.Close()
+
+		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+		fmt.Fprintln(w, "ID\tEMAIL\tCREATED_AT")
+		count := 0
+		for rows.Next() {
+			var id uuid.UUID
+			var email string
+			var createdAt time.Time
+			if err := rows.Scan(&id, &email, &createdAt); err != nil {
+				return fmt.Errorf("scan user: %w", err)
+			}
+			fmt.Fprintf(w, "%s\t%s\t%s\n", id, email, createdAt.Format(time.RFC3339))
+			count++
+		}
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("iterate users: %w", err)
+		}
+		if count == 0 {
+			fmt.Println("(no users — run: idp users create <email> <password>)")
+			return nil
+		}
+		return w.Flush()
+
+	default:
+		return usageErr(fmt.Sprintf("users: unknown subcommand %q", args[0]))
 	}
 }
 
@@ -116,15 +198,78 @@ func runServe() error {
 		}
 	}
 
+	// Layer 5 wiring: sessions, clients, consent, codes, handlers. Each
+	// store is Postgres-backed; handlers are constructed from narrow
+	// configs that inject these stores + HTML templates.
+	userStore := users.NewPostgresStore(pool)
+	sessionStore := users.NewPostgresSessionStore(pool)
+	clientStore := clients.NewPostgresStore(pool)
+	consentStore := consent.NewPostgresStore(pool)
+	codeStore := oauth.NewPostgresAuthCodeStore(pool)
+
+	templates, err := myhttp.ParseTemplates()
+	if err != nil {
+		return fmt.Errorf("parse templates: %w", err)
+	}
+
+	csrfKey, err := myhttp.ParseCSRFKey(cfg.csrfKeyHex)
+	if err != nil {
+		return fmt.Errorf("CSRF key: %w", err)
+	}
+
+	secure := strings.HasPrefix(cfg.issuerURL, "https://")
+
+	// Adapter: clients.PostgresStore → http.ClientLookup. The handler
+	// only needs GetByID returning a narrow display struct; define the
+	// adapter locally as a closure-bearing struct.
+	clientLookup := &clientLookupAdapter{store: clientStore}
+
+	loginCfg := myhttp.LoginConfig{
+		Users:      userStore,
+		Sessions:   sessionStore,
+		Templates:  templates,
+		BaseURL:    cfg.issuerURL,
+		SessionTTL: users.DefaultSessionTTL,
+		Secure:     secure,
+	}
+	consentCfg := myhttp.ConsentConfig{
+		Consent:   consentStore,
+		Users:     userStore,
+		Clients:   clientLookup,
+		Templates: templates,
+		BaseURL:   cfg.issuerURL,
+	}
+	authorizeCfg := oauth.AuthorizeConfig{
+		Clients:   clientStore,
+		Consent:   consentStore,
+		AuthCodes: codeStore,
+		CodeTTL:   oauth.DefaultCodeTTL,
+		CurrentSessionUser: func(r *nethttp.Request) (uuid.UUID, bool) {
+			sess := myhttp.SessionFromContext(r.Context())
+			if sess == nil {
+				return uuid.Nil, false
+			}
+			return sess.UserID, true
+		},
+	}
+
 	router := myhttp.New(myhttp.RouterConfig{
 		Discovery: oidc.DiscoveryConfig{
-			Issuer: cfg.issuerURL,
-			// Scopes the seeded localdev client advertises in its allow
-			// list. Broadened later as we implement more handlers.
+			Issuer:          cfg.issuerURL,
 			ScopesSupported: []string{"openid", "profile", "email", "read:docs", "write:docs", "admin:users"},
 		},
 		KeyStore:     keyStore,
 		PostgresPing: func() error { return pool.Ping(context.Background()) },
+
+		Sessions: sessionStore,
+		CSRFKey:  csrfKey,
+		Secure:   secure,
+
+		Authorize:   oauth.Authorize(authorizeCfg),
+		LoginGET:    myhttp.LoginGET(loginCfg),
+		LoginPOST:   myhttp.LoginPOST(loginCfg),
+		ConsentGET:  myhttp.ConsentGET(consentCfg),
+		ConsentPOST: myhttp.ConsentPOST(consentCfg),
 	})
 
 	srv := &nethttp.Server{
@@ -161,10 +306,26 @@ func runServe() error {
 type serveConfig struct {
 	databaseURL   string
 	kekHex        string
+	csrfKeyHex    string
 	issuerURL     string
 	httpAddr      string
 	shutdownGrace time.Duration
 	logLevel      slog.Level
+}
+
+// clientLookupAdapter bridges *clients.PostgresStore → http.ClientLookup.
+// Translates the concrete client struct into the narrow display shape
+// the consent handler needs. Lives here because it's a wiring concern.
+type clientLookupAdapter struct {
+	store *clients.PostgresStore
+}
+
+func (a *clientLookupAdapter) GetByID(ctx context.Context, id string) (myhttp.ClientDisplay, error) {
+	c, err := a.store.GetByID(ctx, id)
+	if err != nil {
+		return myhttp.ClientDisplay{}, err
+	}
+	return myhttp.ClientDisplay{ID: c.ID, RedirectURIs: c.RedirectURIs}, nil
 }
 
 func loadServeConfig() (serveConfig, error) {
@@ -176,6 +337,10 @@ func loadServeConfig() (serveConfig, error) {
 	c.kekHex = os.Getenv("JWT_SIGNING_KEY_ENCRYPTION_KEY")
 	if c.kekHex == "" {
 		return c, fmt.Errorf("JWT_SIGNING_KEY_ENCRYPTION_KEY not set (need 64 hex chars)")
+	}
+	c.csrfKeyHex = os.Getenv("CSRF_KEY")
+	if c.csrfKeyHex == "" {
+		return c, fmt.Errorf("CSRF_KEY not set (need 64 hex chars for CSRF token signing)")
 	}
 
 	c.issuerURL = envOr("ISSUER_URL", "http://localhost:8080")
@@ -355,18 +520,21 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, `usage: idp <command> [args]
 
 Subcommands:
-  serve                      run the OIDC HTTP server (serves discovery + JWKS today)
-  keys generate              create a new PENDING signing key
-  keys list                  show all signing keys with status and age
-  keys activate <kid>        PENDING -> ACTIVE (at most one active, DB-enforced)
-  keys retire <kid>          ACTIVE  -> RETIRED (remains in JWKS until aged out)
-  help                       print this message
+  serve                             run the OIDC HTTP server
+  keys generate                     create a new PENDING signing key
+  keys list                         show all signing keys with status + age
+  keys activate <kid>               PENDING -> ACTIVE (at most one active)
+  keys retire <kid>                 ACTIVE  -> RETIRED
+  users create <email> <password>   create a user (argon2id-hashed)
+  users list                        show all users
+  help                              print this message
 
 Env (shared):
   DATABASE_URL                     postgres://... (required)
-  JWT_SIGNING_KEY_ENCRYPTION_KEY   32 bytes hex-encoded (required)
+  JWT_SIGNING_KEY_ENCRYPTION_KEY   32 bytes hex-encoded (required for keys + serve)
 
 Env (serve only):
+  CSRF_KEY                         32 bytes hex-encoded (required)
   ISSUER_URL                       default http://localhost:8080
   HTTP_ADDR                        default :8080
   SHUTDOWN_GRACE                   default 15s

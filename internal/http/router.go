@@ -17,15 +17,32 @@ import (
 
 	"github.com/mhockenbury/identity-provider/internal/oidc"
 	"github.com/mhockenbury/identity-provider/internal/tokens"
+	"github.com/mhockenbury/identity-provider/internal/users"
 )
 
 // RouterConfig wires the router. All real work lives behind interfaces
 // so tests can supply fakes without a DB or full service stack.
+//
+// The layer-5 handlers (Authorize / LoginGET / LoginPOST / ConsentGET /
+// ConsentPOST) plus Sessions + CSRFKey are optional as a group. When
+// Sessions is nil the router skips /login, /consent, /authorize and the
+// CSRF + WithSession middleware — useful for a minimal "discovery + JWKS
+// only" smoke-test boot.
 type RouterConfig struct {
 	Discovery oidc.DiscoveryConfig
 	KeyStore  oidc.JWKSKeyStore
-	// PostgresHealth + any future OpenFGAHealth hooks — nil-safe.
+	// PostgresPing is used by /healthz; nil-safe.
 	PostgresPing func() error
+
+	// Layer 5 wiring. If Sessions is nil, the whole set is skipped.
+	Sessions    users.SessionStore
+	CSRFKey     []byte // 32 bytes; only used when Sessions != nil
+	Secure      bool   // TLS flag (session cookies + CSRF mode)
+	Authorize   http.HandlerFunc
+	LoginGET    http.HandlerFunc
+	LoginPOST   http.HandlerFunc
+	ConsentGET  http.HandlerFunc
+	ConsentPOST http.HandlerFunc
 }
 
 // requestTimeout bounds per-request work end-to-end. The IdP has no
@@ -58,6 +75,48 @@ func New(cfg RouterConfig) http.Handler {
 	// on first failure so container orchestrators can react, but
 	// degradation doesn't cascade to the whole handler surface.
 	r.Get("/healthz", healthHandler(cfg.PostgresPing))
+
+	// Layer 5: /authorize + login + consent. Only registered when the
+	// session store is wired (otherwise we don't have the primitives
+	// these endpoints need).
+	if cfg.Sessions != nil {
+		withSession := WithSession(cfg.Sessions)
+		csrfMW := CSRFMiddleware(cfg.CSRFKey, cfg.Secure)
+
+		// /authorize reads session but doesn't mutate state itself.
+		// It redirects to /login or /consent as needed.
+		r.Group(func(r chi.Router) {
+			r.Use(withSession)
+			if cfg.Authorize != nil {
+				r.Get("/authorize", cfg.Authorize)
+			}
+		})
+
+		// /login GET and POST. CSRF on POST. No session middleware
+		// needed — the POST establishes the session.
+		r.Group(func(r chi.Router) {
+			r.Use(csrfMW)
+			if cfg.LoginGET != nil {
+				r.Get("/login", cfg.LoginGET)
+			}
+			if cfg.LoginPOST != nil {
+				r.Post("/login", cfg.LoginPOST)
+			}
+		})
+
+		// /consent GET and POST. Both need a session AND CSRF (GET to
+		// issue the token, POST to verify it).
+		r.Group(func(r chi.Router) {
+			r.Use(withSession)
+			r.Use(csrfMW)
+			if cfg.ConsentGET != nil {
+				r.Get("/consent", cfg.ConsentGET)
+			}
+			if cfg.ConsentPOST != nil {
+				r.Post("/consent", cfg.ConsentPOST)
+			}
+		})
+	}
 
 	return r
 }
@@ -115,3 +174,7 @@ func healthHandler(pingPG func() error) http.HandlerFunc {
 // Not strictly necessary but protects against a refactor that silently breaks
 // the http↔oidc↔tokens seam.
 var _ oidc.JWKSKeyStore = (*tokens.KeyStore)(nil)
+
+// Similarly, users.PostgresSessionStore satisfies users.SessionStore (and
+// thus the router's session type).
+var _ users.SessionStore = (*users.PostgresSessionStore)(nil)
