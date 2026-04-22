@@ -36,7 +36,7 @@ services:
   # OpenFGA runs its own migration once against its DB before it can serve.
   # This one-shot service handles that; openfga (the server) waits for it.
   openfga-migrate:
-    image: openfga/openfga:v1.9.4
+    image: openfga/openfga:v1.14.2
     depends_on:
       postgres-fga:
         condition: service_healthy
@@ -47,7 +47,7 @@ services:
     restart: "no"
 
   openfga:
-    image: openfga/openfga:v1.9.4
+    image: openfga/openfga:v1.14.2
     depends_on:
       openfga-migrate:
         condition: service_completed_successfully

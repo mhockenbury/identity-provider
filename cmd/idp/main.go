@@ -15,6 +15,9 @@
 //   idp groups list-members <group>                  — list members of a group
 //   idp fga init                                      — bootstrap: create OpenFGA store + upload auth model
 //                                                       prints OPENFGA_STORE_ID + OPENFGA_AUTHORIZATION_MODEL_ID
+//   idp outbox list [--pending|--failed|--all]         — inspect fga_outbox rows (default: --pending)
+//   idp outbox retry <id>                              — reset attempt_count + clear last_error on a row
+//   idp outbox purge <id> [--force]                    — delete an outbox row (refuses pending rows unless --force)
 //
 // Env vars:
 //   DATABASE_URL                     required; e.g. postgres://idp:idp@localhost:5434/idp?sslmode=disable
@@ -34,6 +37,7 @@ import (
 	nethttp "net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"text/tabwriter"
@@ -76,6 +80,8 @@ func run(args []string) error {
 		return runGroups(args[1:])
 	case "fga":
 		return runFGA(args[1:])
+	case "outbox":
+		return runOutbox(args[1:])
 	case "-h", "--help", "help":
 		printUsage()
 		return nil
@@ -150,6 +156,260 @@ func runFGAInit() error {
 	fmt.Printf("  export OPENFGA_STORE_ID=%s\n", storeID)
 	fmt.Printf("  export OPENFGA_AUTHORIZATION_MODEL_ID=%s\n", modelID)
 	return nil
+}
+
+// --- outbox admin ---
+//
+// `idp outbox` is the operator's view into fga_outbox. It doesn't run the
+// worker (that's cmd/outbox-worker); it just lets you inspect and nudge
+// rows when something goes wrong.
+//
+//	idp outbox list [--pending|--failed|--all]  (default: --pending)
+//	idp outbox retry <id>                        reset attempt_count+last_error
+//	idp outbox purge <id>                        delete a row permanently
+//
+// All three read DATABASE_URL from env.
+
+func runOutbox(args []string) error {
+	if len(args) < 1 {
+		return usageErr("outbox: no subcommand")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		return fmt.Errorf("DATABASE_URL not set")
+	}
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		return fmt.Errorf("pgxpool.New: %w", err)
+	}
+	defer pool.Close()
+
+	switch args[0] {
+	case "list":
+		return runOutboxList(ctx, pool, args[1:])
+	case "retry":
+		if len(args) < 2 {
+			return usageErr("outbox retry: need <id>")
+		}
+		return runOutboxRetry(ctx, pool, args[1])
+	case "purge":
+		return runOutboxPurge(ctx, pool, args[1:])
+	default:
+		return usageErr(fmt.Sprintf("outbox: unknown subcommand %q", args[0]))
+	}
+}
+
+// runOutboxList prints outbox rows in a tab-aligned table. The filter
+// selects which rows to show; default is --pending (unprocessed,
+// attempt_count below the retry ceiling — the set the worker would claim).
+// --failed shows rows that hit the ceiling (poison pills). --all shows
+// everything including already-processed rows.
+func runOutboxList(ctx context.Context, pool *pgxpool.Pool, args []string) error {
+	filter := "pending"
+	if len(args) > 0 {
+		switch args[0] {
+		case "--pending":
+			filter = "pending"
+		case "--failed":
+			filter = "failed"
+		case "--all":
+			filter = "all"
+		default:
+			return usageErr(fmt.Sprintf("outbox list: unknown flag %q (want --pending|--failed|--all)", args[0]))
+		}
+	}
+
+	// The retry ceiling is the worker's OUTBOX_MAX_ATTEMPTS — we read it
+	// the same way the worker does so the admin view matches what the
+	// worker is actually claiming. Default 5 matches cmd/outbox-worker.
+	maxAttempts := 5
+	if v := os.Getenv("OUTBOX_MAX_ATTEMPTS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			maxAttempts = n
+		}
+	}
+
+	var q string
+	var qArgs []any
+	switch filter {
+	case "pending":
+		q = `SELECT id, event_type, payload, created_at, processed_at, attempt_count, last_error
+		     FROM fga_outbox
+		     WHERE processed_at IS NULL AND attempt_count < $1
+		     ORDER BY id`
+		qArgs = []any{maxAttempts}
+	case "failed":
+		q = `SELECT id, event_type, payload, created_at, processed_at, attempt_count, last_error
+		     FROM fga_outbox
+		     WHERE processed_at IS NULL AND attempt_count >= $1
+		     ORDER BY id`
+		qArgs = []any{maxAttempts}
+	case "all":
+		q = `SELECT id, event_type, payload, created_at, processed_at, attempt_count, last_error
+		     FROM fga_outbox
+		     ORDER BY id`
+	}
+
+	rows, err := pool.Query(ctx, q, qArgs...)
+	if err != nil {
+		return fmt.Errorf("query: %w", err)
+	}
+	defer rows.Close()
+
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "ID\tTYPE\tSTATUS\tATTEMPTS\tCREATED\tPAYLOAD\tLAST_ERROR")
+	count := 0
+	for rows.Next() {
+		var (
+			id           int64
+			eventType    string
+			payload      []byte
+			createdAt    time.Time
+			processedAt  *time.Time
+			attemptCount int
+			lastError    *string
+		)
+		if err := rows.Scan(&id, &eventType, &payload, &createdAt, &processedAt, &attemptCount, &lastError); err != nil {
+			return fmt.Errorf("scan: %w", err)
+		}
+
+		status := "pending"
+		if processedAt != nil {
+			status = "processed"
+		} else if attemptCount >= maxAttempts {
+			status = "failed"
+		}
+
+		errStr := ""
+		if lastError != nil {
+			errStr = truncate(*lastError, 60)
+		}
+
+		fmt.Fprintf(w, "%d\t%s\t%s\t%d\t%s\t%s\t%s\n",
+			id, eventType, status, attemptCount,
+			createdAt.Format(time.RFC3339),
+			truncate(string(payload), 60),
+			errStr,
+		)
+		count++
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate: %w", err)
+	}
+	if err := w.Flush(); err != nil {
+		return err
+	}
+	if count == 0 {
+		fmt.Fprintf(os.Stderr, "(no %s rows)\n", filter)
+	}
+	return nil
+}
+
+// runOutboxRetry resets attempt_count to 0 and clears last_error for a
+// single row. Intended for poison-pill recovery after you've fixed the
+// underlying cause (e.g. missing FGA type in the model). The row must
+// not already be processed — that would be a silent re-send.
+func runOutboxRetry(ctx context.Context, pool *pgxpool.Pool, idStr string) error {
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		return fmt.Errorf("parse id %q: %w", idStr, err)
+	}
+
+	const q = `
+        UPDATE fga_outbox
+        SET attempt_count = 0,
+            last_error    = NULL
+        WHERE id = $1
+          AND processed_at IS NULL`
+
+	ct, err := pool.Exec(ctx, q, id)
+	if err != nil {
+		return fmt.Errorf("update: %w", err)
+	}
+	if ct.RowsAffected() == 0 {
+		return fmt.Errorf("row %d not found or already processed", id)
+	}
+	fmt.Printf("reset row %d (attempt_count=0, last_error cleared)\n", id)
+	return nil
+}
+
+// runOutboxPurge deletes a row outright. Use for events that should never
+// be retried — typically a poison-pill row whose payload is malformed
+// past the point the worker can translate it, AFTER the underlying
+// identity change has been reconciled to FGA out-of-band.
+//
+// By default, refuses to purge a row that's still in the worker's claim
+// set (pending, below the retry ceiling). The common mistake is purging
+// a fresh pending row whose identity-side DB change has already
+// committed — that silently desyncs identity vs FGA. Pass --force to
+// override when you know what you're doing.
+func runOutboxPurge(ctx context.Context, pool *pgxpool.Pool, args []string) error {
+	if len(args) < 1 {
+		return usageErr("outbox purge: need <id>")
+	}
+	force := false
+	var idStr string
+	for _, a := range args {
+		if a == "--force" {
+			force = true
+			continue
+		}
+		idStr = a
+	}
+	if idStr == "" {
+		return usageErr("outbox purge: need <id>")
+	}
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		return fmt.Errorf("parse id %q: %w", idStr, err)
+	}
+
+	if !force {
+		maxAttempts := 5
+		if v := os.Getenv("OUTBOX_MAX_ATTEMPTS"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				maxAttempts = n
+			}
+		}
+		var (
+			processedAt  *time.Time
+			attemptCount int
+		)
+		err := pool.QueryRow(ctx,
+			`SELECT processed_at, attempt_count FROM fga_outbox WHERE id = $1`,
+			id,
+		).Scan(&processedAt, &attemptCount)
+		if err != nil {
+			return fmt.Errorf("row %d not found: %w", id, err)
+		}
+		if processedAt == nil && attemptCount < maxAttempts {
+			return fmt.Errorf("row %d is still pending (attempt_count=%d < %d); "+
+				"purging it can desync identity state vs FGA — pass --force if you're sure",
+				id, attemptCount, maxAttempts)
+		}
+	}
+
+	const q = `DELETE FROM fga_outbox WHERE id = $1`
+	ct, err := pool.Exec(ctx, q, id)
+	if err != nil {
+		return fmt.Errorf("delete: %w", err)
+	}
+	if ct.RowsAffected() == 0 {
+		return fmt.Errorf("row %d not found", id)
+	}
+	fmt.Printf("deleted row %d\n", id)
+	return nil
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n-1] + "…"
 }
 
 // runGroups dispatches the `idp groups` subcommands. These are the
@@ -869,6 +1129,9 @@ Subcommands:
   groups remove-member <grp> <email> remove user (enqueues FGA outbox event)
   groups list-members <group>       show group membership
   fga init                          create OpenFGA store + upload model
+  outbox list [--pending|--failed|--all]  inspect fga_outbox rows
+  outbox retry <id>                 reset attempt_count + clear last_error
+  outbox purge <id> [--force]       delete a row (refuses pending rows unless --force)
   help                              print this message
 
 Env (shared):

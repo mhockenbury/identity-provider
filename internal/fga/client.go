@@ -117,9 +117,15 @@ func WriteTuples(ctx context.Context, c *client.OpenFgaClient, tuples []client.C
 // single atomic request. Either all operations succeed or all fail.
 // The worker uses this to batch a mixed set of outbox events into one
 // FGA round-trip.
+//
+// idempotent=true sets OnDuplicateWrites="ignore" + OnMissingDeletes="ignore",
+// so a retried batch that already partly-applied (worker crashed mid-ack)
+// won't fail. The outbox guarantees at-least-once delivery; ignoring
+// duplicates turns that into effectively-once at the FGA layer.
 func WriteAndDelete(ctx context.Context, c *client.OpenFgaClient,
 	writes []client.ClientTupleKey,
 	deletes []client.ClientTupleKeyWithoutCondition,
+	idempotent bool,
 ) error {
 	if len(writes) == 0 && len(deletes) == 0 {
 		return nil
@@ -131,7 +137,17 @@ func WriteAndDelete(ctx context.Context, c *client.OpenFgaClient,
 	if len(deletes) > 0 {
 		body.Deletes = deletes
 	}
-	_, err := c.Write(ctx).Body(body).Execute()
+
+	req := c.Write(ctx).Body(body)
+	if idempotent {
+		req = req.Options(client.ClientWriteOptions{
+			Conflict: client.ClientWriteConflictOptions{
+				OnDuplicateWrites: client.CLIENT_WRITE_REQUEST_ON_DUPLICATE_WRITES_IGNORE,
+				OnMissingDeletes:  client.CLIENT_WRITE_REQUEST_ON_MISSING_DELETES_IGNORE,
+			},
+		})
+	}
+	_, err := req.Execute()
 	return err
 }
 
