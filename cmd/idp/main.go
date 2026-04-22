@@ -198,14 +198,14 @@ func runServe() error {
 		}
 	}
 
-	// Layer 5 wiring: sessions, clients, consent, codes, handlers. Each
-	// store is Postgres-backed; handlers are constructed from narrow
-	// configs that inject these stores + HTML templates.
+	// Layer 5 + 6 wiring: all the Postgres-backed stores the HTTP layer needs.
 	userStore := users.NewPostgresStore(pool)
 	sessionStore := users.NewPostgresSessionStore(pool)
 	clientStore := clients.NewPostgresStore(pool)
 	consentStore := consent.NewPostgresStore(pool)
 	codeStore := oauth.NewPostgresAuthCodeStore(pool)
+	refreshStore := tokens.NewPostgresRefreshTokenStore(pool)
+	signer := tokens.NewSigner(keyStore, kek, cfg.issuerURL, nil)
 
 	templates, err := myhttp.ParseTemplates()
 	if err != nil {
@@ -252,6 +252,17 @@ func runServe() error {
 			return sess.UserID, true
 		},
 	}
+	tokenCfg := oauth.TokenConfig{
+		Clients:         clientStore,
+		AuthCodes:       codeStore,
+		RefreshTokens:   refreshStore,
+		Signer:          signer,
+		AccessTokenTTL:  cfg.accessTokenTTL,
+		IDTokenTTL:      cfg.idTokenTTL,
+		RefreshTokenTTL: cfg.refreshTokenTTL,
+		Issuer:          cfg.issuerURL,
+		UserInfo:        &userInfoAdapter{store: userStore},
+	}
 
 	router := myhttp.New(myhttp.RouterConfig{
 		Discovery: oidc.DiscoveryConfig{
@@ -270,6 +281,7 @@ func runServe() error {
 		LoginPOST:   myhttp.LoginPOST(loginCfg),
 		ConsentGET:  myhttp.ConsentGET(consentCfg),
 		ConsentPOST: myhttp.ConsentPOST(consentCfg),
+		Token:       oauth.Token(tokenCfg),
 	})
 
 	srv := &nethttp.Server{
@@ -304,13 +316,16 @@ func runServe() error {
 }
 
 type serveConfig struct {
-	databaseURL   string
-	kekHex        string
-	csrfKeyHex    string
-	issuerURL     string
-	httpAddr      string
-	shutdownGrace time.Duration
-	logLevel      slog.Level
+	databaseURL     string
+	kekHex          string
+	csrfKeyHex      string
+	issuerURL       string
+	httpAddr        string
+	accessTokenTTL  time.Duration
+	idTokenTTL      time.Duration
+	refreshTokenTTL time.Duration
+	shutdownGrace   time.Duration
+	logLevel        slog.Level
 }
 
 // clientLookupAdapter bridges *clients.PostgresStore → http.ClientLookup.
@@ -326,6 +341,20 @@ func (a *clientLookupAdapter) GetByID(ctx context.Context, id string) (myhttp.Cl
 		return myhttp.ClientDisplay{}, err
 	}
 	return myhttp.ClientDisplay{ID: c.ID, RedirectURIs: c.RedirectURIs}, nil
+}
+
+// userInfoAdapter bridges *users.PostgresStore → oauth.UserInfoLookup,
+// exposing only ID + Email for ID-token issuance.
+type userInfoAdapter struct {
+	store *users.PostgresStore
+}
+
+func (a *userInfoAdapter) GetByID(ctx context.Context, id uuid.UUID) (oauth.UserInfo, error) {
+	u, err := a.store.GetByID(ctx, id)
+	if err != nil {
+		return oauth.UserInfo{}, err
+	}
+	return oauth.UserInfo{ID: u.ID, Email: u.Email}, nil
 }
 
 func loadServeConfig() (serveConfig, error) {
@@ -346,14 +375,25 @@ func loadServeConfig() (serveConfig, error) {
 	c.issuerURL = envOr("ISSUER_URL", "http://localhost:8080")
 	c.httpAddr = envOr("HTTP_ADDR", ":8080")
 
-	if v := os.Getenv("SHUTDOWN_GRACE"); v != "" {
-		d, err := time.ParseDuration(v)
-		if err != nil {
-			return c, fmt.Errorf("SHUTDOWN_GRACE=%q: %w", v, err)
-		}
-		c.shutdownGrace = d
-	} else {
-		c.shutdownGrace = 15 * time.Second
+	var err error
+
+	// Token TTLs — defaults per README §6 decisions.
+	c.accessTokenTTL, err = envDur("ACCESS_TOKEN_TTL", 15*time.Minute)
+	if err != nil {
+		return c, err
+	}
+	c.idTokenTTL, err = envDur("ID_TOKEN_TTL", 5*time.Minute)
+	if err != nil {
+		return c, err
+	}
+	c.refreshTokenTTL, err = envDur("REFRESH_TOKEN_TTL", 30*24*time.Hour)
+	if err != nil {
+		return c, err
+	}
+
+	c.shutdownGrace, err = envDur("SHUTDOWN_GRACE", 15*time.Second)
+	if err != nil {
+		return c, err
 	}
 
 	c.logLevel = parseLogLevel(os.Getenv("LOG_LEVEL"))
@@ -365,6 +405,18 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func envDur(key string, fallback time.Duration) (time.Duration, error) {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return 0, fmt.Errorf("%s=%q: %w", key, v, err)
+	}
+	return d, nil
 }
 
 func parseLogLevel(v string) slog.Level {

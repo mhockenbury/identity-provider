@@ -43,6 +43,11 @@ type RouterConfig struct {
 	LoginPOST   http.HandlerFunc
 	ConsentGET  http.HandlerFunc
 	ConsentPOST http.HandlerFunc
+
+	// Layer 6 wiring. /token is a back-channel endpoint: no session
+	// middleware, no CSRF (the client authenticates with credentials,
+	// not a cookie). Safe to register independently.
+	Token http.HandlerFunc
 }
 
 // requestTimeout bounds per-request work end-to-end. The IdP has no
@@ -116,6 +121,12 @@ func New(cfg RouterConfig) http.Handler {
 				r.Post("/consent", cfg.ConsentPOST)
 			}
 		})
+	}
+
+	// Layer 6: /token. Back-channel — no session, no CSRF. Client
+	// authentication happens inside the handler via Basic/form fields.
+	if cfg.Token != nil {
+		r.Post("/token", cfg.Token)
 	}
 
 	return r

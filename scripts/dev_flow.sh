@@ -148,18 +148,77 @@ if [ -z "$code" ]; then
     exit 1
 fi
 
+printf "\n[7/7] POST /token (exchange code for tokens)\n"
+token_response=$(curl -s -X POST "${BASE_URL}/token" \
+    --data-urlencode "grant_type=authorization_code" \
+    --data-urlencode "code=${code}" \
+    --data-urlencode "redirect_uri=${REDIRECT_URI}" \
+    --data-urlencode "client_id=${CLIENT_ID}" \
+    --data-urlencode "code_verifier=${VERIFIER}")
+# Pretty-print if jq is available.
+if command -v jq >/dev/null 2>&1; then
+    printf '%s\n' "$token_response" | jq '{
+        token_type,
+        expires_in,
+        scope,
+        access_token:  (if .access_token  then (.access_token  | .[0:32] + "...") else null end),
+        id_token:      (if .id_token      then (.id_token      | .[0:32] + "...") else null end),
+        refresh_token: (if .refresh_token then (.refresh_token | .[0:32] + "...") else null end)
+    }'
+else
+    echo "$token_response"
+fi
+
+access_token=$(printf '%s' "$token_response" | grep -oP '"access_token":"\K[^"]+' || true)
+refresh_token=$(printf '%s' "$token_response" | grep -oP '"refresh_token":"\K[^"]+' || true)
+id_token=$(printf '%s' "$token_response" | grep -oP '"id_token":"\K[^"]+' || true)
+if [ -z "$access_token" ]; then
+    echo "ERROR: /token did not return access_token. Response:"
+    printf '%s\n' "$token_response"
+    exit 1
+fi
+
+# Decode the JWT payload (no verify) — useful "what's actually in there" check.
+if command -v jq >/dev/null 2>&1; then
+    printf '\nAccess token claims (decoded, NOT verified):\n'
+    payload=$(printf '%s' "$access_token" | awk -F. '{print $2}')
+    # base64url → base64 + padding.
+    pad=$(( 4 - ${#payload} % 4 ))
+    [ $pad -ne 4 ] && payload="${payload}$(printf '%0.s=' $(seq 1 $pad))"
+    printf '%s' "$payload" | tr '_-' '/+' | base64 -d 2>/dev/null | jq . || echo "(decode failed)"
+
+    if [ -n "$id_token" ]; then
+        printf '\nID token claims (decoded, NOT verified):\n'
+        payload=$(printf '%s' "$id_token" | awk -F. '{print $2}')
+        pad=$(( 4 - ${#payload} % 4 ))
+        [ $pad -ne 4 ] && payload="${payload}$(printf '%0.s=' $(seq 1 $pad))"
+        printf '%s' "$payload" | tr '_-' '/+' | base64 -d 2>/dev/null | jq . || echo "(decode failed)"
+    fi
+fi
+
+if [ -n "$refresh_token" ]; then
+    printf "\n=== bonus: refresh the token ===\n"
+    refresh_response=$(curl -s -X POST "${BASE_URL}/token" \
+        --data-urlencode "grant_type=refresh_token" \
+        --data-urlencode "refresh_token=${refresh_token}" \
+        --data-urlencode "client_id=${CLIENT_ID}")
+    if command -v jq >/dev/null 2>&1; then
+        printf '%s\n' "$refresh_response" | jq '{
+            token_type, expires_in, scope,
+            access_token:  (if .access_token  then (.access_token  | .[0:32] + "...") else null end),
+            refresh_token_rotated: (if .refresh_token then true else false end)
+        }'
+    else
+        echo "$refresh_response"
+    fi
+fi
+
 cat <<EOF
 
 === flow complete ===
-code:         $code
-state match:  $([ "$state_back" = "$STATE" ] && echo 'yes' || echo "NO (got $state_back, want $STATE)")
-code_verifier: $VERIFIER
-
-Next step (once /token is implemented):
-  curl -X POST ${BASE_URL}/token \\
-    -d grant_type=authorization_code \\
-    -d code=$code \\
-    -d redirect_uri=${REDIRECT_URI} \\
-    -d client_id=${CLIENT_ID} \\
-    -d code_verifier=$VERIFIER
+initial code:  $code
+state match:   $([ "$state_back" = "$STATE" ] && echo 'yes' || echo "NO (got $state_back, want $STATE)")
+access_token:  issued
+id_token:      $([ -n "$id_token" ] && echo 'issued' || echo 'not issued')
+refresh_token: $([ -n "$refresh_token" ] && echo 'issued + rotated' || echo 'not issued')
 EOF
