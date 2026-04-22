@@ -75,7 +75,7 @@ Two implementations of `tokens.KeyResolver`:
 - `KeyStoreResolver` (internal): hits Postgres directly. Used by
   `/userinfo` so the IdP verifies its own tokens with no HTTP round-trip
   through its own JWKS endpoint.
-- Future demo-api will implement with an HTTP-fetched JWKS cache, exercising
+- Future docs-api will implement with an HTTP-fetched JWKS cache, exercising
   the real "downstream signature verification" lesson.
 
 ### CSRF: gorilla/csrf + plaintext-HTTP workaround
@@ -143,7 +143,7 @@ Confidential clients could authenticate via client-cert instead of
 client_secret. Public clients already use PKCE-only, which is fine.
 
 ### DPoP / sender-constrained tokens (RFC 9449)
-Demonstrate on one demo-api endpoint post-layer 9. Full RFC 9449
+Demonstrate on one docs-api endpoint post-layer 9. Full RFC 9449
 implementation is out of scope; the goal is "feel why it exists."
 
 ### Dynamic client registration (RFC 7591)

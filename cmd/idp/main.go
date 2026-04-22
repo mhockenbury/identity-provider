@@ -108,7 +108,7 @@ func runFGA(args []string) error {
 // runFGAInit creates a new OpenFGA store, uploads the authorization
 // model, and prints both IDs. The operator copies them into .env
 // (OPENFGA_STORE_ID + OPENFGA_AUTHORIZATION_MODEL_ID) for the worker
-// + demo-api to use.
+// + docs-api to use.
 //
 // Idempotency note: this IS NOT idempotent. Each call creates a NEW
 // store and a NEW model. For the lab that's fine (you run this once

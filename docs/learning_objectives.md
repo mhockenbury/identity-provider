@@ -21,10 +21,10 @@ clients, what `nonce` protects, why ID tokens are signed but opaque to APIs.
 Signing, `kid` lookup, public key distribution, key rotation mechanics,
 client-side JWKS caching with refresh-on-unknown-kid.
 
-**Covered by:** core. `internal/tokens/*`, `/.well-known/jwks.json`, demo-api
+**Covered by:** core. `internal/tokens/*`, `/.well-known/jwks.json`, docs-api
 JWKS cache.
-**Verified by:** demo-api validates tokens across a simulated key rotation
-(IdP rotates signing key; demo-api refetches JWKS on cache miss for new kid).
+**Verified by:** docs-api validates tokens across a simulated key rotation
+(IdP rotates signing key; docs-api refetches JWKS on cache miss for new kid).
 
 ### Refresh token rotation (Level 2)
 Each refresh invalidates the old refresh token and issues a new one.
@@ -52,22 +52,22 @@ In real systems you may accept tokens from your own IdP *and* an upstream
 or sibling IdP. This forces: per-issuer JWKS cache, `iss` allowlist, handling
 `kid` collisions between issuers.
 
-**Covered by:** core. demo-api configured with two trusted issuers (our IdP
+**Covered by:** core. docs-api configured with two trusted issuers (our IdP
 + a mock second one, e.g., a simple second IdP instance with its own keys).
-**Verified by:** demo-api accepts tokens from either issuer, rejects tokens
+**Verified by:** docs-api accepts tokens from either issuer, rejects tokens
 with valid signatures from the wrong issuer (e.g., mock issuer's token used
 against an endpoint that only trusts our IdP — and vice versa).
 
 ### Downstream signature verification
-demo-api validates tokens entirely locally — it never calls the IdP per-
+docs-api validates tokens entirely locally — it never calls the IdP per-
 request. This is how production services work and is where JWT + JWKS
 earn their complexity budget. Covers: signature, `exp`, `iss`, `aud`,
 scope presence.
 
-**Covered by:** core. `cmd/demo-api`'s token-validating middleware.
+**Covered by:** core. `cmd/docs-api`'s token-validating middleware.
 **Verified by:**
 - Forged-token test case (sign with a local random key, assert rejection)
-- JWKS-cache-miss test case (IdP rotates, demo-api's cache has only the old
+- JWKS-cache-miss test case (IdP rotates, docs-api's cache has only the old
   `kid`; the new `kid` triggers a refetch; subsequent tokens work)
 - Expired-token test case (exp in the past, assert rejection)
 
@@ -77,7 +77,7 @@ has been *allowed to ask for* (set at consent time, encoded in the token).
 *Authz* is what this specific access can actually do (FGA check at request
 time). Both are needed; they're not redundant.
 
-**Covered by:** core. `cmd/demo-api` enforces scope in middleware
+**Covered by:** core. `cmd/docs-api` enforces scope in middleware
 (fast-fail) and FGA check in handler (fine-grained).
 **Verified by:**
 - Request with `read:docs` scope but no viewer tuple on the specific doc
@@ -91,7 +91,7 @@ sender-constraining tokens exists. Bearer tokens can be stolen and replayed;
 DPoP binds the token to a client-held key so a stolen token is useless
 without the key.
 
-**Covered by:** stretch. One endpoint on demo-api that requires a DPoP
+**Covered by:** stretch. One endpoint on docs-api that requires a DPoP
 header alongside the access token, with the DPoP JWT's `jkt` claim
 matching the access token's `cnf.jkt` claim. Using a library; not
 implementing the full spec.
@@ -123,7 +123,7 @@ Stretch. Adds `grant_type=urn:ietf:params:oauth:grant-type:token-exchange`
 to `/token`. Lets a service downscope an incoming token for a further
 downstream call (`aud` change, scope subset).
 
-**Verified by:** demo-api exchanges its incoming token for a scope-reduced
+**Verified by:** docs-api exchanges its incoming token for a scope-reduced
 one before calling a hypothetical second downstream service.
 
 ### Dynamic client registration (RFC 7591)

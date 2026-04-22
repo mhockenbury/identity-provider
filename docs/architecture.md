@@ -50,10 +50,10 @@ Key behaviors:
 - **attempt_count + last_error** let us backoff poison-pill events rather than infinite-retry
 - Translation table from event_type → FGA ops lives in `internal/fga/translations.go`
 
-### demo-api (`cmd/demo-api`)
-Separate binary on `:8082` (OpenFGA's HTTP port occupies host :8081 per
-docker-compose.yml). Deliberately minimal business logic; exists to
-make the downstream-service lessons concrete.
+### docs-api (`cmd/docs-api`)
+Separate binary on `:8083` (OpenFGA occupies host :8081 for HTTP and
+:8082 for gRPC per docker-compose.yml). Deliberately minimal business
+logic; exists to make the downstream-service lessons concrete.
 
 ```
 middleware: authenticate
@@ -82,7 +82,7 @@ storage backend). We don't modify it; we're learning the consumer-correct patter
 
 Two OpenFGA APIs we'll use:
 - `Write` (called by outbox-worker) to write tuples
-- `Check` (called by demo-api handlers) to authorize specific operations
+- `Check` (called by docs-api handlers) to authorize specific operations
 
 Optional later: `Expand` for debug/explainability, `BatchCheck` for performance.
 
@@ -185,12 +185,12 @@ OAuth 2.0 has specific error response shapes. We honor them.
 - `/token` errors → JSON `{error, error_description}` with appropriate status (400 for most, 401 for invalid_client)
 - `/userinfo` errors → `WWW-Authenticate` header per RFC 6750
 
-demo-api errors → plain JSON `{error}` for simplicity (it's a lab API).
+docs-api errors → plain JSON `{error}` for simplicity (it's a lab API).
 
 ## Testing approach
 
 - **Unit tests:** pure functions — PKCE verify, JWT build, scope logic, outbox event translation
 - **Integration tests:** hit a real Postgres + real OpenFGA via docker-compose. Skip cleanly if unreachable (same pattern as url-shortener). **No mocked DBs** — matches matt's standing feedback.
 - **E2E smoke:** oidc-client-ts in a browser, scripted via Playwright. Demo API called with the resulting token. This is the ultimate correctness test — if a mainstream OIDC client completes the full flow, we know the protocol implementation is right.
-- **Forged token test:** demo-api explicitly rejects a token signed with a non-trusted key
-- **Key rotation test:** simulate the IdP rotating signing keys mid-flight; demo-api's JWKS cache refreshes on unknown kid
+- **Forged token test:** docs-api explicitly rejects a token signed with a non-trusted key
+- **Key rotation test:** simulate the IdP rotating signing keys mid-flight; docs-api's JWKS cache refreshes on unknown kid

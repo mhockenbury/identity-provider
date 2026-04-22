@@ -1,7 +1,7 @@
 export PATH := $(PATH):/usr/local/go/bin:$(HOME)/go/bin
 
-.PHONY: up down migrate run-idp run-outbox-worker run-demo-api test tidy build fmt vet
-.PHONY: up-app down-app restart-app status-app logs-idp logs-outbox-worker logs-demo-api up-all down-all _wait-deps check-deps
+.PHONY: up down migrate run-idp run-outbox-worker run-docs-api test tidy build fmt vet
+.PHONY: up-app down-app restart-app status-app logs-idp logs-outbox-worker logs-docs-api up-all down-all _wait-deps check-deps
 .PHONY: dev-secrets dev-reset dev-key dev-user dev-all dev-serve oauth-url dev-flow check-deps-idp up-idp-only
 
 up:
@@ -24,8 +24,8 @@ run-idp:
 run-outbox-worker:
 	go run ./cmd/outbox-worker
 
-run-demo-api:
-	go run ./cmd/demo-api
+run-docs-api:
+	go run ./cmd/docs-api
 
 test:
 	go test ./...
@@ -42,14 +42,14 @@ tidy:
 build:
 	go build -o bin/idp ./cmd/idp
 	go build -o bin/outbox-worker ./cmd/outbox-worker
-	go build -o bin/demo-api ./cmd/demo-api
+	go build -o bin/docs-api ./cmd/docs-api
 
 # --- App process lifecycle (background) ---
-# Same pattern as url-shortener. Three processes: idp, outbox-worker, demo-api.
+# Same pattern as url-shortener. Three processes: idp, outbox-worker, docs-api.
 # PID + log files under run/ (gitignored). Preserves graceful-shutdown path.
 
 RUN_DIR := run
-APPS    := idp outbox-worker demo-api
+APPS    := idp outbox-worker docs-api
 
 up-app: build check-deps
 	@mkdir -p $(RUN_DIR)
@@ -73,7 +73,7 @@ status-app:
 
 logs-idp:             ; tail -f $(RUN_DIR)/idp.log
 logs-outbox-worker:   ; tail -f $(RUN_DIR)/outbox-worker.log
-logs-demo-api:        ; tail -f $(RUN_DIR)/demo-api.log
+logs-docs-api:        ; tail -f $(RUN_DIR)/docs-api.log
 
 up-all: up _wait-deps up-app
 down-all: down-app

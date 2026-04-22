@@ -45,7 +45,7 @@ The `.well-known/openid-configuration` document. Tiny.
 How to send an access token in `Authorization: Bearer` and how servers respond with `WWW-Authenticate` errors.
 
 - **Read for us:** §2.1 (header form), §3 (error responses)
-- **Land in code:** `cmd/demo-api/*`, auth middleware
+- **Land in code:** `cmd/docs-api/*`, auth middleware
 
 ## Secondary (referenced as guard rails)
 
@@ -77,7 +77,7 @@ Passkeys. Large spec; we use `github.com/go-webauthn/webauthn`.
 ### [RFC 9449 — DPoP](https://www.rfc-editor.org/rfc/rfc9449)
 Demonstrating Proof-of-Possession. Sender-constrains tokens with a client-held key.
 
-- **Stretch trigger:** demonstrate on one demo-api endpoint so matt feels why sender-constraining exists; not full implementation
+- **Stretch trigger:** demonstrate on one docs-api endpoint so matt feels why sender-constraining exists; not full implementation
 
 ### [RFC 7523 — JWT Profile for Client Authentication](https://www.rfc-editor.org/rfc/rfc7523)
 Using JWTs (instead of client_secret) for client authentication at `/token`.

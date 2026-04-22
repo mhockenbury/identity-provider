@@ -26,7 +26,7 @@ func (f *fixedClock) Advance(d time.Duration) {
 }
 
 // staticResolver answers kid → public key from a fixed map. This is what
-// the demo-api's JWKS cache will look like, minus the cache layer.
+// the docs-api's JWKS cache will look like, minus the cache layer.
 type staticResolver struct {
 	keys map[string]ed25519.PublicKey
 }
@@ -76,7 +76,7 @@ func newSignerFixture(t *testing.T, issuer string) *signerFixture {
 }
 
 // resolverFromFixture builds a KeyResolver that answers kid → pub for
-// every key that's been generated in the store. Simulates a demo-api
+// every key that's been generated in the store. Simulates a docs-api
 // whose JWKS cache is fresh.
 func resolverFromFixture(t *testing.T, f *signerFixture) *staticResolver {
 	t.Helper()
@@ -101,7 +101,7 @@ func TestSignAccessToken_ProducesVerifiableJWT(t *testing.T) {
 		BaseClaims: tokens.BaseClaims{
 			RegisteredClaims: jwt.RegisteredClaims{
 				Subject:  "user-alice",
-				Audience: jwt.ClaimStrings{"demo-api"},
+				Audience: jwt.ClaimStrings{"docs-api"},
 			},
 		},
 		Scope:    "read:docs write:docs",
@@ -117,7 +117,7 @@ func TestSignAccessToken_ProducesVerifiableJWT(t *testing.T) {
 
 	v := tokens.NewVerifier(
 		map[string]tokens.KeyResolver{f.issuer: resolverFromFixture(t, f)},
-		"demo-api",
+		"docs-api",
 		f.clock,
 	)
 	got, err := v.Verify(ctx, raw)
@@ -218,7 +218,7 @@ func TestVerify_RejectsExpiredToken(t *testing.T) {
 	raw, err := f.signer.SignAccessToken(ctx, tokens.AccessClaims{
 		BaseClaims: tokens.BaseClaims{
 			RegisteredClaims: jwt.RegisteredClaims{
-				Subject: "u", Audience: jwt.ClaimStrings{"demo-api"},
+				Subject: "u", Audience: jwt.ClaimStrings{"docs-api"},
 			},
 		},
 	}, 1*time.Minute)
@@ -231,7 +231,7 @@ func TestVerify_RejectsExpiredToken(t *testing.T) {
 
 	v := tokens.NewVerifier(
 		map[string]tokens.KeyResolver{f.issuer: resolverFromFixture(t, f)},
-		"demo-api",
+		"docs-api",
 		f.clock,
 	)
 	_, err = v.Verify(ctx, raw)
@@ -249,7 +249,7 @@ func TestVerify_RejectsTokenFromUnknownIssuer(t *testing.T) {
 	raw, _ := f.signer.SignAccessToken(ctx, tokens.AccessClaims{
 		BaseClaims: tokens.BaseClaims{
 			RegisteredClaims: jwt.RegisteredClaims{
-				Subject: "u", Audience: jwt.ClaimStrings{"demo-api"},
+				Subject: "u", Audience: jwt.ClaimStrings{"docs-api"},
 			},
 		},
 	}, time.Minute)
@@ -257,7 +257,7 @@ func TestVerify_RejectsTokenFromUnknownIssuer(t *testing.T) {
 	// Verifier trusts ONLY idp-b, but the token was issued by idp-a.
 	v := tokens.NewVerifier(
 		map[string]tokens.KeyResolver{"https://idp-b.test": resolverFromFixture(t, f)},
-		"demo-api",
+		"docs-api",
 		f.clock,
 	)
 	_, err := v.Verify(ctx, raw)
@@ -267,7 +267,7 @@ func TestVerify_RejectsTokenFromUnknownIssuer(t *testing.T) {
 }
 
 // Multi-issuer: verifier trusts A and B, token is from B, must succeed.
-// Mirrors the real multi-issuer deployment — "demo-api accepts tokens
+// Mirrors the real multi-issuer deployment — "docs-api accepts tokens
 // from our IdP *and* an upstream or sibling".
 //
 // Uses direct jwt-go signing (skipping the DB-backed Signer) for the
@@ -287,7 +287,7 @@ func TestVerify_AcceptsTokenFromAnyTrustedIssuer(t *testing.T) {
 			RegisteredClaims: jwt.RegisteredClaims{
 				Issuer:    "https://idp-b.test",
 				Subject:   "u-from-b",
-				Audience:  jwt.ClaimStrings{"demo-api"},
+				Audience:  jwt.ClaimStrings{"docs-api"},
 				ExpiresAt: jwt.NewNumericDate(fA.clock.Now().Add(time.Minute)),
 				NotBefore: jwt.NewNumericDate(fA.clock.Now()),
 				IssuedAt:  jwt.NewNumericDate(fA.clock.Now()),
@@ -307,7 +307,7 @@ func TestVerify_AcceptsTokenFromAnyTrustedIssuer(t *testing.T) {
 			"https://idp-a.test": resolverFromFixture(t, fA),
 			"https://idp-b.test": &staticResolver{keys: map[string]ed25519.PublicKey{kidB: pubB}},
 		},
-		"demo-api",
+		"docs-api",
 		fA.clock,
 	)
 	got, err := v.Verify(ctx, raw)
@@ -340,7 +340,7 @@ func TestVerify_SameKIDAcrossIssuersResolvedByIssuer(t *testing.T) {
 			RegisteredClaims: jwt.RegisteredClaims{
 				Issuer:    "https://idp-b.test",
 				Subject:   "u-from-b",
-				Audience:  jwt.ClaimStrings{"demo-api"},
+				Audience:  jwt.ClaimStrings{"docs-api"},
 				ExpiresAt: jwt.NewNumericDate(fA.clock.Now().Add(time.Minute)),
 				NotBefore: jwt.NewNumericDate(fA.clock.Now()),
 				IssuedAt:  jwt.NewNumericDate(fA.clock.Now()),
@@ -360,7 +360,7 @@ func TestVerify_SameKIDAcrossIssuersResolvedByIssuer(t *testing.T) {
 			// B's resolver has B's key under the same kid string.
 			"https://idp-b.test": &staticResolver{keys: map[string]ed25519.PublicKey{sharedKID: pubB}},
 		},
-		"demo-api",
+		"docs-api",
 		fA.clock,
 	)
 	// Token claims iss=B → verifier must pick B's resolver → succeeds with B's key.
@@ -414,7 +414,7 @@ func TestVerify_RejectsForgedToken(t *testing.T) {
 			RegisteredClaims: jwt.RegisteredClaims{
 				Issuer:    f.issuer,
 				Subject:   "u-forged",
-				Audience:  jwt.ClaimStrings{"demo-api"},
+				Audience:  jwt.ClaimStrings{"docs-api"},
 				ExpiresAt: jwt.NewNumericDate(f.clock.Now().Add(time.Minute)),
 				IssuedAt:  jwt.NewNumericDate(f.clock.Now()),
 			},
@@ -429,7 +429,7 @@ func TestVerify_RejectsForgedToken(t *testing.T) {
 
 	v := tokens.NewVerifier(
 		map[string]tokens.KeyResolver{f.issuer: resolverFromFixture(t, f)},
-		"demo-api",
+		"docs-api",
 		f.clock,
 	)
 	_, err = v.Verify(ctx, raw)
@@ -439,7 +439,7 @@ func TestVerify_RejectsForgedToken(t *testing.T) {
 }
 
 // Unknown kid: token header has a kid the resolver doesn't know. Surfaces
-// as ErrUnknownKID so the demo-api middleware can distinguish "refetch
+// as ErrUnknownKID so the docs-api middleware can distinguish "refetch
 // JWKS" (unknown kid) from "reject outright" (invalid signature).
 func TestVerify_UnknownKIDSurfacesAsSentinel(t *testing.T) {
 	f := newSignerFixture(t, "https://idp.test")
@@ -452,7 +452,7 @@ func TestVerify_UnknownKIDSurfacesAsSentinel(t *testing.T) {
 	raw, err := f.signer.SignAccessToken(ctx, tokens.AccessClaims{
 		BaseClaims: tokens.BaseClaims{
 			RegisteredClaims: jwt.RegisteredClaims{
-				Subject: "u", Audience: jwt.ClaimStrings{"demo-api"},
+				Subject: "u", Audience: jwt.ClaimStrings{"docs-api"},
 			},
 		},
 	}, time.Minute)
@@ -465,7 +465,7 @@ func TestVerify_UnknownKIDSurfacesAsSentinel(t *testing.T) {
 		map[string]tokens.KeyResolver{
 			f.issuer: &staticResolver{keys: map[string]ed25519.PublicKey{}},
 		},
-		"demo-api",
+		"docs-api",
 		f.clock,
 	)
 	_, err = v.Verify(ctx, raw)
@@ -486,7 +486,7 @@ func TestVerify_RejectsWrongAlg(t *testing.T) {
 			RegisteredClaims: jwt.RegisteredClaims{
 				Issuer:    f.issuer,
 				Subject:   "u",
-				Audience:  jwt.ClaimStrings{"demo-api"},
+				Audience:  jwt.ClaimStrings{"docs-api"},
 				ExpiresAt: jwt.NewNumericDate(f.clock.Now().Add(time.Minute)),
 			},
 		},
@@ -499,7 +499,7 @@ func TestVerify_RejectsWrongAlg(t *testing.T) {
 
 	v := tokens.NewVerifier(
 		map[string]tokens.KeyResolver{f.issuer: resolverFromFixture(t, f)},
-		"demo-api",
+		"docs-api",
 		f.clock,
 	)
 	_, err = v.Verify(ctx, raw)
@@ -521,7 +521,7 @@ func TestVerify_RejectsTamperedPayload(t *testing.T) {
 	raw, err := f.signer.SignAccessToken(ctx, tokens.AccessClaims{
 		BaseClaims: tokens.BaseClaims{
 			RegisteredClaims: jwt.RegisteredClaims{
-				Subject: "u-legit", Audience: jwt.ClaimStrings{"demo-api"},
+				Subject: "u-legit", Audience: jwt.ClaimStrings{"docs-api"},
 			},
 		},
 		Scope: "read:docs",
@@ -547,7 +547,7 @@ func TestVerify_RejectsTamperedPayload(t *testing.T) {
 
 	v := tokens.NewVerifier(
 		map[string]tokens.KeyResolver{f.issuer: resolverFromFixture(t, f)},
-		"demo-api",
+		"docs-api",
 		f.clock,
 	)
 	_, err = v.Verify(ctx, tampered)

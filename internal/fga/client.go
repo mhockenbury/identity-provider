@@ -36,7 +36,7 @@ type Config struct {
 }
 
 // NewClient builds an OpenFGA SDK client from Config. Used by the worker,
-// the init CLI, and (later) demo-api.
+// the init CLI, and (later) docs-api.
 func NewClient(cfg Config) (*client.OpenFgaClient, error) {
 	clientCfg := client.ClientConfiguration{
 		ApiUrl:               cfg.APIURL,
@@ -151,7 +151,7 @@ func WriteAndDelete(ctx context.Context, c *client.OpenFgaClient,
 	return err
 }
 
-// Check is used by demo-api (layer 9) and by tests. Thin wrapper
+// Check is used by docs-api (layer 9) and by tests. Thin wrapper
 // returning a simple bool.
 func Check(ctx context.Context, c *client.OpenFgaClient, user, relation, object string) (bool, error) {
 	resp, err := c.Check(ctx).Body(client.ClientCheckRequest{

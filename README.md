@@ -18,7 +18,7 @@
 - **Refresh tokens with rotation** (each use invalidates the old, issues new)
 - **Scope-based access control** — clients request scopes at `/authorize`, user consents, scopes land in access tokens, downstream API enforces
 - **Claims-to-tuples sync** — user/group membership changes in the IdP emit FGA tuple writes via the outbox pattern
-- **Separate reference API** (`cmd/demo-api`) that validates tokens against JWKS locally and enforces FGA checks — demonstrates the downstream-service side of the protocol
+- **Separate reference API** (`cmd/docs-api`) that validates tokens against JWKS locally and enforces FGA checks — demonstrates the downstream-service side of the protocol
 
 ### Non-functional / scope cuts
 - **No capacity estimates or SLOs** — deliberate. This is a protocols-and-correctness learning project, not a scale story. Numbers would be noise.
@@ -181,7 +181,7 @@ flowchart LR
     Worker[outbox-worker<br/>Go]
     FGA[OpenFGA<br/>HTTP API]
     PG_FGA[(Postgres<br/>OpenFGA schema)]
-    API[demo-api<br/>Go]
+    API[docs-api<br/>Go]
 
     Browser -->|authorize/token/userinfo| IdP
     IdP --> PG_IdP
@@ -197,7 +197,7 @@ flowchart LR
 
 - **`idp`** — OIDC authorization server. Owns user identity, client registry, token issuance, key management. Writes FGA outbox entries in the same transaction as identity mutations.
 - **`outbox-worker`** — claims batches of pending outbox rows (SELECT FOR UPDATE SKIP LOCKED), translates to OpenFGA tuple writes, marks processed. Idempotent on replay.
-- **`demo-api`** — separate binary to make the "downstream service" lesson concrete. Validates JWTs locally via JWKS (cached, with key rotation awareness), enforces scope, calls FGA for fine-grained checks.
+- **`docs-api`** — separate binary to make the "downstream service" lesson concrete. Validates JWTs locally via JWKS (cached, with key rotation awareness), enforces scope, calls FGA for fine-grained checks.
 - **OpenFGA** — the tuple store + check engine. We use it as an opaque service; we are *not* reimplementing Zanzibar internals.
 - **Postgres (×2)** — one database for the IdP, one for OpenFGA (owned by OpenFGA). Deliberate separation; reflects realistic deployment.
 
@@ -254,12 +254,12 @@ sequenceDiagram
     end
 ```
 
-### Key request flow — demo-api validates and authorizes
+### Key request flow — docs-api validates and authorizes
 
 ```mermaid
 sequenceDiagram
     participant C as Client
-    participant A as demo-api
+    participant A as docs-api
     participant I as IdP (JWKS only)
     participant F as OpenFGA
 
@@ -326,7 +326,7 @@ N/A by scope. Lab project. Not pursuing.
 | OpenFGA down | outbox-worker insert fails | retry with backoff; outbox accumulates; /healthz flags. IdP continues issuing tokens. |
 | Postgres down | any handler | return 503; graceful shutdown; identity writes fail — acceptable |
 | Signing key expired | sign fails | rotate keys (stretch: auto-rotate); current_key check at startup |
-| JWKS cache stale on demo-api | signature verify fails | demo-api refetches JWKS on unknown `kid`; tests this path |
+| JWKS cache stale on docs-api | signature verify fails | docs-api refetches JWKS on unknown `kid`; tests this path |
 | Refresh token revoked mid-flight | /token returns 400 invalid_grant | client re-authenticates |
 | Worker crashes mid-batch | outbox row still has `processed_at IS NULL` | next worker claims via SKIP LOCKED; idempotent writes to FGA |
 | Duplicate outbox processing | at-least-once delivery | FGA tuple writes are idempotent; same tuple written twice is a no-op |
@@ -343,7 +343,7 @@ make migrate                # IdP schema + client/user seed fixtures
 # run the three binaries (separate terminals or make up-app once implemented)
 make run-idp                # :8080
 make run-outbox-worker
-make run-demo-api           # :8081
+make run-docs-api           # :8081
 
 # smoke test (planned)
 make oidc-smoke             # runs oidc-client-ts against the IdP

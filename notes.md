@@ -23,7 +23,7 @@ GET /authorize → redirect to /login → POST /login → redirect to /consent �
 
 Pending:
 - **Layer 8** — outbox writer hooks (inside identity-mutation transactions) + `cmd/outbox-worker` draining to OpenFGA. The novel "claims-to-tuples" twist.
-- **Layer 9** — demo-api (separate binary validating JWTs against JWKS, enforcing FGA).
+- **Layer 9** — docs-api (separate binary validating JWTs against JWKS, enforcing FGA).
 - **Stretches** — WebAuthn, DPoP, refresh reuse detection, RFC 8693 token exchange, **client-app/SPA integration** (catch-all callback listener or a real oidc-client-ts SPA; currently the browser flow dead-ends at `localhost:5173/callback` with "Unable to connect" because no client exists).
 
 ## Decisions (during scaffolding)
@@ -45,7 +45,7 @@ Big-pattern choices worth recording so future sessions don't re-derive them.
 - **Signing algorithm:** Ed25519 / `EdDSA`. Modern, 32-byte keys, fast; one alg only (no RS256 fallback).
 - **KEK:** env-var-loaded 32-byte symmetric, AES-256-GCM envelope, `kid` bound as AAD so row-mix bugs fail loud. In production this would be a KMS; the `KEK` interface is deliberately small so swapping is trivial.
 - **Signing-key state machine:** 3 states derived from timestamps (PENDING / ACTIVE / RETIRED). Partial unique index `signing_keys_one_active_idx` enforces "at most one active" at the DB, not in code — a race or code bug can't produce two actives.
-- **Verifier resolver choice:** two implementations of `KeyResolver` — `KeyStoreResolver` (internal, hits Postgres directly, no HTTP) for the IdP verifying its own tokens at `/userinfo`; downstream services (future demo-api) will implement with an HTTP-fetched JWKS cache.
+- **Verifier resolver choice:** two implementations of `KeyResolver` — `KeyStoreResolver` (internal, hits Postgres directly, no HTTP) for the IdP verifying its own tokens at `/userinfo`; downstream services (future docs-api) will implement with an HTTP-fetched JWKS cache.
 
 ### Password + client secret hashing
 
@@ -177,15 +177,18 @@ open http://localhost:3000
 | `BATCH_SIZE` | `100` | |
 | `BLOCK_DURATION` | `1s` | |
 
-### cmd/demo-api (planned, layer 9)
+### cmd/docs-api (layer 9)
 
 | Var | Default | Notes |
 |-----|---------|-------|
-| `HTTP_ADDR` | `:8082` | |
+| `HTTP_ADDR` | `:8083` | `:8082` is OpenFGA's gRPC port on the host |
 | `TRUSTED_ISSUERS` | — | Comma-separated allowlist; multi-issuer learning |
-| `REQUIRED_AUD` | `demo-api` | |
+| `REQUIRED_AUD` | `docs-api` | |
 | `OPENFGA_API_URL` | `http://localhost:8081` | |
 | `OPENFGA_STORE_ID` | same as worker | |
+| `OPENFGA_AUTHORIZATION_MODEL_ID` | same as worker | |
+| `SHUTDOWN_GRACE` | `15s` | |
+| `LOG_LEVEL` | `info` | debug\|info\|warn\|error |
 
 ## References
 

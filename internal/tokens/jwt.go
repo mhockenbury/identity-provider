@@ -110,7 +110,7 @@ func (s *Signer) sign(ctx context.Context, claims jwt.Claims) (string, error) {
 }
 
 // Verifier validates JWTs emitted by any configured issuer. Used by the
-// demo-api for downstream verification — but exposed here in the tokens
+// docs-api for downstream verification — but exposed here in the tokens
 // package so internal verification (e.g., ID tokens issued for internal
 // clients) can use the same code path.
 //

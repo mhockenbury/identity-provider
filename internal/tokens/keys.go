@@ -347,7 +347,7 @@ const pgUniqueViolation = "23505"
 // through its public JWKS endpoint — no HTTP round-trip, no cache
 // staleness concerns, keys come straight from Postgres.
 //
-// Downstream services (demo-api) will implement KeyResolver differently,
+// Downstream services (docs-api) will implement KeyResolver differently,
 // with an HTTP-fetched JWKS cache.
 type KeyStoreResolver struct {
 	store *KeyStore

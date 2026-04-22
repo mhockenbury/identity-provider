@@ -67,7 +67,7 @@ func BuildJWKS(keys []*SigningKey) JWKS {
 
 // ParseJWKS reads a JWKS JSON document into the wire struct. Used by
 // downstream services that fetch and cache the set — tests simulate this
-// path, and demo-api will use it for real when that's wired up.
+// path, and docs-api will use it for real when that's wired up.
 func ParseJWKS(raw []byte) (JWKS, error) {
 	var j JWKS
 	if err := json.Unmarshal(raw, &j); err != nil {

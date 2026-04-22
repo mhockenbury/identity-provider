@@ -42,7 +42,7 @@ func JWKSHandler(store JWKSKeyStore) http.Handler {
 		w.Header().Set("Content-Type", "application/json")
 		// Aggressive cache: downstream services cache JWKS; 5 minutes is a
 		// common default. Rotation is not invalidated by Cache-Control —
-		// downstream clients must refetch on unknown kid too (demo-api does).
+		// downstream clients must refetch on unknown kid too (docs-api does).
 		w.Header().Set("Cache-Control", "public, max-age=300")
 		_, _ = w.Write(body)
 	})
