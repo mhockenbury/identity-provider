@@ -222,12 +222,12 @@ sequenceDiagram
     I->>P: verify password_hash
     I-->>U: consent form (if scopes not already consented)
     U->>I: grant consent
-    I->>P: BEGIN tx; INSERT auth_code; INSERT consent; COMMIT
+    I->>P: BEGIN tx<br/>INSERT auth_code<br/>INSERT consent<br/>COMMIT
     I-->>U: 302 → C /callback?code=Y
     U->>C: arrive with code
     C->>I: POST /token (code, code_verifier, client_auth)
     I->>P: SELECT auth_code; verify code_challenge matches SHA256(code_verifier)
-    I->>P: BEGIN tx; UPDATE auth_code SET used_at; INSERT refresh_token; COMMIT
+    I->>P: BEGIN tx<br/>UPDATE auth_code SET used_at<br/>INSERT refresh_token<br/>COMMIT
     I->>I: sign access_token (JWT) + id_token (JWT)
     I-->>C: {access_token, id_token, refresh_token, expires_in}
 ```
