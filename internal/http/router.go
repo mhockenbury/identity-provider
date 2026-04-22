@@ -48,6 +48,10 @@ type RouterConfig struct {
 	// middleware, no CSRF (the client authenticates with credentials,
 	// not a cookie). Safe to register independently.
 	Token http.HandlerFunc
+
+	// Layer 7: /userinfo. Bearer-authenticated, no session, no CSRF.
+	// OIDC Core §5.3.
+	UserInfo http.HandlerFunc
 }
 
 // requestTimeout bounds per-request work end-to-end. The IdP has no
@@ -127,6 +131,11 @@ func New(cfg RouterConfig) http.Handler {
 	// authentication happens inside the handler via Basic/form fields.
 	if cfg.Token != nil {
 		r.Post("/token", cfg.Token)
+	}
+
+	// Layer 7: /userinfo. Bearer-authenticated, no session, no CSRF.
+	if cfg.UserInfo != nil {
+		r.Get("/userinfo", cfg.UserInfo)
 	}
 
 	return r

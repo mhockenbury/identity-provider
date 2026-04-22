@@ -18,7 +18,7 @@ set -euo pipefail
 BASE_URL="http://localhost:8080"
 CLIENT_ID="localdev"
 REDIRECT_URI="http://localhost:5173/callback"
-SCOPE="openid read:docs"
+SCOPE="openid email read:docs"
 STATE="$(head -c 12 /dev/urandom | xxd -p)"
 NONCE="$(head -c 12 /dev/urandom | xxd -p)"
 EMAIL="smoke-alice@example.com"
@@ -194,6 +194,14 @@ if command -v jq >/dev/null 2>&1; then
         [ $pad -ne 4 ] && payload="${payload}$(printf '%0.s=' $(seq 1 $pad))"
         printf '%s' "$payload" | tr '_-' '/+' | base64 -d 2>/dev/null | jq . || echo "(decode failed)"
     fi
+fi
+
+printf "\n[8/8] GET /userinfo (with the access token)\n"
+userinfo_response=$(curl -s -H "Authorization: Bearer ${access_token}" "${BASE_URL}/userinfo")
+if command -v jq >/dev/null 2>&1; then
+    printf '%s\n' "$userinfo_response" | jq .
+else
+    echo "$userinfo_response"
 fi
 
 if [ -n "$refresh_token" ]; then

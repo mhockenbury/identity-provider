@@ -341,3 +341,31 @@ func (s *KeyStore) scanOne(ctx context.Context, q string, args ...any) (*Signing
 
 // pgUniqueViolation is the SQLSTATE for 23505.
 const pgUniqueViolation = "23505"
+
+// KeyStoreResolver adapts a *KeyStore to the KeyResolver interface used
+// by *Verifier. Lets the IdP verify its OWN access tokens without going
+// through its public JWKS endpoint — no HTTP round-trip, no cache
+// staleness concerns, keys come straight from Postgres.
+//
+// Downstream services (demo-api) will implement KeyResolver differently,
+// with an HTTP-fetched JWKS cache.
+type KeyStoreResolver struct {
+	store *KeyStore
+}
+
+// NewKeyStoreResolver wraps a KeyStore so it satisfies KeyResolver.
+func NewKeyStoreResolver(store *KeyStore) *KeyStoreResolver {
+	return &KeyStoreResolver{store: store}
+}
+
+// Resolve looks up the public key for kid directly in the DB. Returns
+// the public key regardless of the key's current state (PENDING / ACTIVE /
+// RETIRED) because access tokens signed by a key that has since been
+// retired must still verify during the overlap window.
+func (r *KeyStoreResolver) Resolve(ctx context.Context, kid string) (ed25519.PublicKey, error) {
+	k, err := r.store.GetByID(ctx, kid)
+	if err != nil {
+		return nil, err
+	}
+	return k.PublicKey, nil
+}

@@ -264,6 +264,20 @@ func runServe() error {
 		UserInfo:        &userInfoAdapter{store: userStore},
 	}
 
+	// /userinfo: verify tokens against our own key store directly (no
+	// round-trip through our public JWKS endpoint). Pass audience="" so
+	// the verifier accepts tokens issued to any client.
+	selfResolver := tokens.NewKeyStoreResolver(keyStore)
+	selfVerifier := tokens.NewVerifier(
+		map[string]tokens.KeyResolver{cfg.issuerURL: selfResolver},
+		"", // any audience
+		nil,
+	)
+	userInfoCfg := oidc.UserInfoConfig{
+		Verifier:  selfVerifier,
+		UserStore: &userInfoOIDCAdapter{store: userStore},
+	}
+
 	router := myhttp.New(myhttp.RouterConfig{
 		Discovery: oidc.DiscoveryConfig{
 			Issuer:          cfg.issuerURL,
@@ -282,6 +296,7 @@ func runServe() error {
 		ConsentGET:  myhttp.ConsentGET(consentCfg),
 		ConsentPOST: myhttp.ConsentPOST(consentCfg),
 		Token:       oauth.Token(tokenCfg),
+		UserInfo:    oidc.UserInfoHandler(userInfoCfg),
 	})
 
 	srv := &nethttp.Server{
@@ -355,6 +370,26 @@ func (a *userInfoAdapter) GetByID(ctx context.Context, id uuid.UUID) (oauth.User
 		return oauth.UserInfo{}, err
 	}
 	return oauth.UserInfo{ID: u.ID, Email: u.Email}, nil
+}
+
+// userInfoOIDCAdapter bridges *users.PostgresStore → oidc.UserInfoStore.
+// Emits oidc.UserInfoData which is a superset of oauth.UserInfo (adds
+// EmailVerified). In this lab we treat every stored email as verified —
+// real signup would flip this after email-confirmation flow.
+type userInfoOIDCAdapter struct {
+	store *users.PostgresStore
+}
+
+func (a *userInfoOIDCAdapter) GetByID(ctx context.Context, id uuid.UUID) (oidc.UserInfoData, error) {
+	u, err := a.store.GetByID(ctx, id)
+	if err != nil {
+		return oidc.UserInfoData{}, err
+	}
+	return oidc.UserInfoData{
+		ID:            u.ID,
+		Email:         u.Email,
+		EmailVerified: true,
+	}, nil
 }
 
 func loadServeConfig() (serveConfig, error) {
