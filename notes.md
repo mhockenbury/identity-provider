@@ -24,7 +24,7 @@ GET /authorize → redirect to /login → POST /login → redirect to /consent �
 Pending:
 - **Layer 8** — outbox writer hooks (inside identity-mutation transactions) + `cmd/outbox-worker` draining to OpenFGA. The novel "claims-to-tuples" twist.
 - **Layer 9** — demo-api (separate binary validating JWTs against JWKS, enforcing FGA).
-- **Stretches** — WebAuthn, DPoP, refresh reuse detection, RFC 8693 token exchange.
+- **Stretches** — WebAuthn, DPoP, refresh reuse detection, RFC 8693 token exchange, **client-app/SPA integration** (catch-all callback listener or a real oidc-client-ts SPA; currently the browser flow dead-ends at `localhost:5173/callback` with "Unable to connect" because no client exists).
 
 ## Decisions (during scaffolding)
 

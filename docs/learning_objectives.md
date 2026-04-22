@@ -129,6 +129,39 @@ one before calling a hypothetical second downstream service.
 ### Dynamic client registration (RFC 7591)
 Likely skipped. Admin UI would fit better first.
 
+### Client application / SPA integration
+Currently the browser flow ends at the client's registered `redirect_uri`
+(`http://localhost:5173/callback`) with "Unable to connect" — nothing is
+listening there. The curl-driven `make dev-flow` exercises the full path,
+but a browser-driven demo dead-ends at the callback.
+
+Two escalating options:
+
+**Lightweight — catch-all callback listener.** A small helper binary
+(Go or Python) that listens on `:5173` and renders the received query
+params + a ready-to-run `curl -X POST /token ...` block. Mirrors what
+a real client backend would do with the code; keeps browser testing
+viable without a full SPA. ~30 lines.
+
+**Full — real SPA using `oidc-client-ts`.** A proper single-page app
+(Vite + TypeScript, no framework necessary) that implements the client
+side of PKCE end-to-end: generates verifier + challenge in browser, hits
+/authorize, receives code at /callback, POSTs to /token, stores tokens,
+calls /userinfo, renders claims. Exercises:
+- PKCE from the browser (crypto.subtle.digest for SHA-256)
+- Same-origin token storage decisions (sessionStorage vs IndexedDB vs in-memory)
+- Silent refresh via the refresh_token
+- The library integration itself — oidc-client-ts is what most real SPAs use
+
+**Verified by:** full browser-only round-trip — click login, land back
+in the SPA, see the user's claims rendered. No curl required.
+
+**Value:** this would materially expand what the subproject covers —
+right now we own the IdP and not the client. A client-app companion
+turns the subproject into a demonstrably complete OIDC ecosystem. Good
+portfolio piece if we ever want to show the whole thing to someone.
+Could be its own tiny subproject or folded in here depending on scope.
+
 ---
 
 ## What I expect to feel at the end
