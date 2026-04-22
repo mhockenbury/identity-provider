@@ -44,6 +44,13 @@ type RouterConfig struct {
 	ConsentGET  http.HandlerFunc
 	ConsentPOST http.HandlerFunc
 
+	// Root landing page + logout. Both session-aware so the landing page
+	// can show login state. Registered alongside the other session-aware
+	// routes. Nil-safe: if unset, no route registered and a GET / falls
+	// through to chi's default 404.
+	Index  http.HandlerFunc
+	Logout http.HandlerFunc
+
 	// Layer 6 wiring. /token is a back-channel endpoint: no session
 	// middleware, no CSRF (the client authenticates with credentials,
 	// not a cookie). Safe to register independently.
@@ -91,6 +98,19 @@ func New(cfg RouterConfig) http.Handler {
 	if cfg.Sessions != nil {
 		withSession := WithSession(cfg.Sessions)
 		csrfMW := CSRFMiddleware(cfg.CSRFKey, cfg.Secure)
+
+		// Root + logout: session-aware (for "signed in as..." display)
+		// but no CSRF — logout is GET-or-POST tolerant, / is read-only.
+		r.Group(func(r chi.Router) {
+			r.Use(withSession)
+			if cfg.Index != nil {
+				r.Get("/", cfg.Index)
+			}
+			if cfg.Logout != nil {
+				r.Get("/logout", cfg.Logout)
+				r.Post("/logout", cfg.Logout)
+			}
+		})
 
 		// /authorize reads session but doesn't mutate state itself.
 		// It redirects to /login or /consent as needed.

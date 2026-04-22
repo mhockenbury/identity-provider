@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>identity-provider</title>
+    <style>
+        body { font-family: system-ui, -apple-system, sans-serif; max-width: 36rem; margin: 4rem auto; padding: 0 1rem; color: #222; }
+        h1 { font-size: 1.4rem; margin-bottom: 0.25rem; }
+        .tagline { color: #777; font-size: 0.875rem; margin-bottom: 2rem; }
+        .state {
+            padding: 0.75rem 1rem; border-radius: 6px; margin-bottom: 2rem;
+            font-size: 0.9rem;
+        }
+        .state.auth  { background: #eaf5ea; border: 1px solid #b7dfb7; color: #275d27; }
+        .state.anon  { background: #f3f3f3; border: 1px solid #ddd; color: #555; }
+        .state .email { font-family: ui-monospace, Menlo, monospace; }
+        h2 { font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.04em; color: #555; margin-top: 1.75rem; margin-bottom: 0.5rem; }
+        ul { margin: 0; padding-left: 1.25rem; }
+        li { margin-bottom: 0.25rem; font-size: 0.9rem; }
+        code, .endpoint { font-family: ui-monospace, Menlo, monospace; font-size: 0.85rem; }
+        a { color: #2563eb; }
+        .footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid #eee; font-size: 0.75rem; color: #888; }
+    </style>
+</head>
+<body>
+    <h1>identity-provider</h1>
+    <div class="tagline">OAuth 2.0 + OIDC server · subproject 2 of sysdesign-lab</div>
+
+    {{- if .Email }}
+    <div class="state auth">
+        Signed in as <span class="email">{{ .Email }}</span>.
+        <a href="/logout">Log out</a>
+    </div>
+    {{- else }}
+    <div class="state anon">
+        Not signed in. This is a protocol server — sign-in happens inside an OAuth flow, not directly.
+    </div>
+    {{- end }}
+
+    <h2>Protocol endpoints</h2>
+    <ul>
+        <li><a href="/.well-known/openid-configuration"><code>/.well-known/openid-configuration</code></a> — OIDC discovery document</li>
+        <li><a href="/.well-known/jwks.json"><code>/.well-known/jwks.json</code></a> — public signing keys</li>
+        <li><span class="endpoint">/authorize</span> — start an OAuth auth-code flow (needs query params; use <code>make oauth-url</code>)</li>
+        <li><span class="endpoint">/token</span> — exchange an auth code for tokens (POST, called by the client's backend)</li>
+        <li><span class="endpoint">/userinfo</span> — user claims for a valid access token (GET with <code>Authorization: Bearer</code>)</li>
+    </ul>
+
+    <h2>Admin / dev</h2>
+    <ul>
+        <li><a href="/healthz"><code>/healthz</code></a> — liveness + Postgres ping</li>
+        <li><span class="endpoint">/login</span> and <span class="endpoint">/consent</span> are step-throughs inside the OAuth flow — don't hit them directly</li>
+    </ul>
+
+    <h2>Getting a working /authorize URL</h2>
+    <p style="font-size: 0.9rem;">
+        <code>make oauth-url</code> prints a paste-ready URL with a fresh PKCE challenge.
+        Or drive the full flow via <code>make dev-flow</code>.
+    </p>
+
+    <div class="footer">
+        identity-provider — subproject 2 of sysdesign-lab
+    </div>
+</body>
+</html>

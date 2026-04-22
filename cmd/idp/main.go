@@ -278,6 +278,15 @@ func runServe() error {
 		UserStore: &userInfoOIDCAdapter{store: userStore},
 	}
 
+	indexCfg := myhttp.IndexConfig{
+		Templates: templates,
+		Users:     userStore,
+	}
+	logoutCfg := myhttp.LogoutConfig{
+		Sessions: sessionStore,
+		Secure:   secure,
+	}
+
 	router := myhttp.New(myhttp.RouterConfig{
 		Discovery: oidc.DiscoveryConfig{
 			Issuer:          cfg.issuerURL,
@@ -290,6 +299,8 @@ func runServe() error {
 		CSRFKey:  csrfKey,
 		Secure:   secure,
 
+		Index:       myhttp.Index(indexCfg),
+		Logout:      myhttp.Logout(logoutCfg),
 		Authorize:   oauth.Authorize(authorizeCfg),
 		LoginGET:    myhttp.LoginGET(loginCfg),
 		LoginPOST:   myhttp.LoginPOST(loginCfg),
