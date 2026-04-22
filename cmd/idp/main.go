@@ -1,13 +1,18 @@
 // The idp binary hosts both the HTTP server and the admin CLI.
 //
 // Subcommands:
-//   idp serve                          — run the OIDC HTTP server
-//   idp keys generate                  — create a new PENDING signing key
-//   idp keys list                      — show all signing keys with status
-//   idp keys activate <kid>            — transition PENDING → ACTIVE
-//   idp keys retire   <kid>            — transition ACTIVE → RETIRED
-//   idp users create <email> <pass>    — create a user (argon2id-hashed password)
-//   idp users list                     — list all users
+//   idp serve                                       — run the OIDC HTTP server
+//   idp keys generate                               — create a new PENDING signing key
+//   idp keys list                                   — show all signing keys with status
+//   idp keys activate <kid>                         — transition PENDING → ACTIVE
+//   idp keys retire   <kid>                         — transition ACTIVE → RETIRED
+//   idp users create <email> <pass>                 — create a user (argon2id-hashed password)
+//   idp users list                                  — list all users
+//   idp groups create <name>                        — create a group
+//   idp groups list                                  — list all groups
+//   idp groups add-member <group> <user-email>       — add user to group (enqueues outbox event)
+//   idp groups remove-member <group> <user-email>    — remove user from group (enqueues outbox event)
+//   idp groups list-members <group>                  — list members of a group
 //
 // Env vars:
 //   DATABASE_URL                     required; e.g. postgres://idp:idp@localhost:5434/idp?sslmode=disable
@@ -40,6 +45,7 @@ import (
 	myhttp "github.com/mhockenbury/identity-provider/internal/http"
 	"github.com/mhockenbury/identity-provider/internal/oauth"
 	"github.com/mhockenbury/identity-provider/internal/oidc"
+	"github.com/mhockenbury/identity-provider/internal/outbox"
 	"github.com/mhockenbury/identity-provider/internal/tokens"
 	"github.com/mhockenbury/identity-provider/internal/users"
 )
@@ -63,11 +69,170 @@ func run(args []string) error {
 		return runKeys(args[1:])
 	case "users":
 		return runUsers(args[1:])
+	case "groups":
+		return runGroups(args[1:])
 	case "-h", "--help", "help":
 		printUsage()
 		return nil
 	default:
 		return usageErr(fmt.Sprintf("unknown subcommand %q", args[0]))
+	}
+}
+
+// runGroups dispatches the `idp groups` subcommands. These are the
+// FIRST callers of outbox.Enqueue — each membership mutation commits
+// the identity row and the outbox row in a single Postgres transaction.
+//
+// Group identifiers in the CLI are NAMES (human-readable) rather than
+// UUIDs, resolved to IDs inside each subcommand. Users are identified
+// by email for the same reason.
+func runGroups(args []string) error {
+	if len(args) < 1 {
+		return usageErr("groups: no subcommand")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		return fmt.Errorf("DATABASE_URL not set")
+	}
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		return fmt.Errorf("pgxpool.New: %w", err)
+	}
+	defer pool.Close()
+	if err := pool.Ping(ctx); err != nil {
+		return fmt.Errorf("postgres ping: %w", err)
+	}
+
+	groups := users.NewGroupStore(pool)
+	userStore := users.NewPostgresStore(pool)
+
+	switch args[0] {
+	case "create":
+		if len(args) < 2 {
+			return usageErr("groups create: need <name>")
+		}
+		g, err := groups.Create(ctx, args[1])
+		if err != nil {
+			return fmt.Errorf("create: %w", err)
+		}
+		fmt.Printf("created group: id=%s name=%s\n", g.ID, g.Name)
+		return nil
+
+	case "list":
+		all, err := groups.List(ctx)
+		if err != nil {
+			return fmt.Errorf("list: %w", err)
+		}
+		if len(all) == 0 {
+			fmt.Println("(no groups — run: idp groups create <name>)")
+			return nil
+		}
+		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+		fmt.Fprintln(w, "ID\tNAME\tCREATED_AT")
+		for _, g := range all {
+			fmt.Fprintf(w, "%s\t%s\t%s\n", g.ID, g.Name, g.CreatedAt.Format(time.RFC3339))
+		}
+		return w.Flush()
+
+	case "add-member":
+		if len(args) < 3 {
+			return usageErr("groups add-member: need <group-name> <user-email>")
+		}
+		groupName, userEmail := args[1], args[2]
+
+		g, err := groups.GetByName(ctx, groupName)
+		if err != nil {
+			return fmt.Errorf("lookup group %q: %w", groupName, err)
+		}
+		u, err := userStore.GetByEmail(ctx, userEmail)
+		if err != nil {
+			return fmt.Errorf("lookup user %q: %w", userEmail, err)
+		}
+
+		// THE critical transaction: identity row + outbox row commit
+		// atomically. If either fails, neither is visible.
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			return fmt.Errorf("begin tx: %w", err)
+		}
+		defer tx.Rollback(ctx) // no-op after Commit
+
+		if err := groups.AddMemberTx(ctx, tx, u.ID, g.ID); err != nil {
+			return fmt.Errorf("add member: %w", err)
+		}
+		event := outbox.GroupMembershipAdded{UserID: u.ID, GroupID: g.ID}
+		if err := outbox.Enqueue(ctx, tx, event); err != nil {
+			return fmt.Errorf("enqueue outbox event: %w", err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return fmt.Errorf("commit: %w", err)
+		}
+		fmt.Printf("added %s to %s (outbox event enqueued)\n", u.Email, g.Name)
+		return nil
+
+	case "remove-member":
+		if len(args) < 3 {
+			return usageErr("groups remove-member: need <group-name> <user-email>")
+		}
+		groupName, userEmail := args[1], args[2]
+
+		g, err := groups.GetByName(ctx, groupName)
+		if err != nil {
+			return fmt.Errorf("lookup group %q: %w", groupName, err)
+		}
+		u, err := userStore.GetByEmail(ctx, userEmail)
+		if err != nil {
+			return fmt.Errorf("lookup user %q: %w", userEmail, err)
+		}
+
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			return fmt.Errorf("begin tx: %w", err)
+		}
+		defer tx.Rollback(ctx)
+
+		if err := groups.RemoveMemberTx(ctx, tx, u.ID, g.ID); err != nil {
+			return fmt.Errorf("remove member: %w", err)
+		}
+		event := outbox.GroupMembershipRemoved{UserID: u.ID, GroupID: g.ID}
+		if err := outbox.Enqueue(ctx, tx, event); err != nil {
+			return fmt.Errorf("enqueue outbox event: %w", err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return fmt.Errorf("commit: %w", err)
+		}
+		fmt.Printf("removed %s from %s (outbox event enqueued)\n", u.Email, g.Name)
+		return nil
+
+	case "list-members":
+		if len(args) < 2 {
+			return usageErr("groups list-members: need <group-name>")
+		}
+		g, err := groups.GetByName(ctx, args[1])
+		if err != nil {
+			return fmt.Errorf("lookup group: %w", err)
+		}
+		members, err := groups.ListMembers(ctx, g.ID)
+		if err != nil {
+			return fmt.Errorf("list members: %w", err)
+		}
+		if len(members) == 0 {
+			fmt.Printf("(group %q has no members)\n", g.Name)
+			return nil
+		}
+		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+		fmt.Fprintln(w, "USER_ID\tEMAIL")
+		for _, m := range members {
+			fmt.Fprintf(w, "%s\t%s\n", m.ID, m.Email)
+		}
+		return w.Flush()
+
+	default:
+		return usageErr(fmt.Sprintf("groups: unknown subcommand %q", args[0]))
 	}
 }
 
@@ -625,6 +790,11 @@ Subcommands:
   keys retire <kid>                 ACTIVE  -> RETIRED
   users create <email> <password>   create a user (argon2id-hashed)
   users list                        show all users
+  groups create <name>              create a group
+  groups list                       show all groups
+  groups add-member <grp> <email>   add user (enqueues FGA outbox event)
+  groups remove-member <grp> <email> remove user (enqueues FGA outbox event)
+  groups list-members <group>       show group membership
   help                              print this message
 
 Env (shared):
