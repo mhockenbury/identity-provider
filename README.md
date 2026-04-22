@@ -226,7 +226,7 @@ sequenceDiagram
     I-->>U: 302 → C /callback?code=Y
     U->>C: arrive with code
     C->>I: POST /token (code, code_verifier, client_auth)
-    I->>P: SELECT auth_code; verify code_challenge matches SHA256(code_verifier)
+    I->>P: SELECT auth_code<br/>verify code_challenge matches SHA256(code_verifier)
     I->>P: BEGIN tx<br/>UPDATE auth_code SET used_at<br/>INSERT refresh_token<br/>COMMIT
     I->>I: sign access_token (JWT) + id_token (JWT)
     I-->>C: {access_token, id_token, refresh_token, expires_in}
