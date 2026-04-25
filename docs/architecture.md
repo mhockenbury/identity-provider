@@ -11,10 +11,11 @@ Stateful HTTP server on `:8080`. Routes live in `internal/http`. Owns:
 - Client registry (`internal/clients`)
 - Token lifecycle (`internal/tokens` — JWT sign, refresh rotation)
 - Key management (`internal/tokens/keys.go`)
-- OAuth handlers (`internal/oauth` — authorize, token)
+- OAuth handlers (`internal/oauth` — authorize, token, refresh-grace cache)
 - OIDC handlers (`internal/oidc` — discovery, jwks, userinfo)
-- Consent tracking (`internal/consent`)
-- Outbox writer (`internal/outbox` — `EnqueueEvent(tx, event)` used by handlers that mutate identity)
+- Consent tracking (`internal/consent`) with admin-scope filtering for non-admin users
+- Outbox writer (`internal/outbox` — `Enqueue(ctx, tx, event)` insists on a `pgx.Tx` so atomicity is compile-time enforced)
+- Admin JSON API (`internal/http/admin`) — bearer-authenticated REST surface mounted at `/admin/api/*`, gated by `admin` scope + `is_admin` flag (defense in depth against post-issue demotion)
 
 Session handling for login/consent: UNSIGNED cookies carrying only the session ID,
 HttpOnly, SameSite=Lax, 12h absolute TTL. Server resolves the ID via Postgres
@@ -46,45 +47,119 @@ while not shutting down:
 
 Key behaviors:
 - **SKIP LOCKED** means multiple worker instances can safely run; each claims a disjoint set of rows
-- **Row-level locking** inside a transaction means if the worker crashes after FGA write but before commit, another worker re-processes — idempotency on FGA tuple writes makes this safe (writing the same tuple twice is a no-op)
-- **attempt_count + last_error** let us backoff poison-pill events rather than infinite-retry
-- Translation table from event_type → FGA ops lives in `internal/fga/translations.go`
+- **Row-level locking** inside a transaction means if the worker crashes after FGA write but before commit, another worker re-processes — idempotency on FGA tuple writes (`OnDuplicateWrites=ignore` flag) makes this safe (writing the same tuple twice is a no-op)
+- **attempt_count + last_error** let us backoff poison-pill events rather than infinite-retry; rows beyond `OUTBOX_MAX_ATTEMPTS=5` drop out of the claim query and surface as "failed" in the admin UI
+- **Per-tuple coalescing across a batch** in `cmd/outbox-worker`: if a batch contains both Write and Delete on the same `(user, relation, object)` tuple, we collapse based on first/last op to avoid hitting `cannot_allow_duplicate_tuples_in_one_request` from FGA
+- Translation: `internal/outbox/translate.go` (event → tuple ops)
 
 ### docs-api (`cmd/docs-api`)
 Separate binary on `:8083` (OpenFGA occupies host :8081 for HTTP and
 :8082 for gRPC per docker-compose.yml). Deliberately minimal business
-logic; exists to make the downstream-service lessons concrete.
+logic; serves an in-memory doc + folder corpus so the SPA can exercise
+the full triangle (browser ↔ IdP ↔ resource server) over realistic data.
 
 ```
-middleware: authenticate
+middleware: authenticate (cmd/docs-api/auth.go)
   - parse Authorization: Bearer <token>
-  - parse JWT header, extract kid + alg
-  - look up (iss, kid) in JWKS cache
-  - on miss: GET <iss>/.well-known/jwks.json, refresh cache
-  - verify signature, exp, nbf, iss (against allowlist), aud
-  - populate request ctx with sub, scopes
-middleware: require_scope(scope)
-  - 403 if scope not present
-handler: resource
-  - call OpenFGA Check(user, relation, object)
-  - 403 if not allowed
+  - call tokens.Verifier.Verify(ctx, raw) — JWKS cache resolves keys per issuer
+  - populate request ctx with verified *AccessClaims
+middleware: requireScope("read:docs" | "write:docs")
+  - 403 if scope not present in claims.Scope
+handler: resource (cmd/docs-api/handlers.go)
+  - call resolvePermission(user, type, id) — runs up to 3 FGA Checks
+    (owner / editor / viewer) highest-first, short-circuit on hit
+  - 404 (not 403) if no tier — hides existence from non-viewers
+  - response includes "permission" field so the SPA can show/hide
+    edit/delete affordances without round-tripping
 ```
 
-Configured with:
+Configured with (all env-driven):
 - `TRUSTED_ISSUERS` — comma-separated list of issuer URLs. Each has its JWKS
   fetched + cached independently. This is where the multi-issuer lesson lives.
-- `FGA_API_URL`, `FGA_STORE_ID` — OpenFGA endpoint
-- `REQUIRED_AUD` — the audience this API accepts
+- `OPENFGA_API_URL`, `OPENFGA_STORE_ID`, `OPENFGA_AUTHORIZATION_MODEL_ID` — OpenFGA endpoint + store/model IDs (printed by `idp fga init`)
+- `REQUIRED_AUD` — the audience this API accepts. **Lab shortcut**: the IdP issues `aud=<client_id>`, so set this to the client id (e.g. `localdev`). Production IdPs would issue per-resource audiences via RFC 8707 resource indicators.
+- `ALLOWED_ORIGINS` — CORS origins. Set to `http://localhost:5173` for the Vite dev server; not strictly needed when going through the dev proxy but useful for direct-origin testing.
+- `DOCS_SEED_{ALICE,BOB,CAROL}` — the user UUIDs to bake into the seeded FGA tuples; the corpus has deterministic IDs but the *people* in it come from the running IdP.
+
+### Admin JSON API (`internal/http/admin`)
+Hosted by the IdP itself under `/admin/api/*`. Purpose: surface the same
+operations as the `idp users|groups|outbox` CLI subcommands as JSON
+endpoints the admin SPA can call.
+
+Defense-in-depth chain in `Authenticate`:
+1. Bearer parse + `tokens.Verifier.Verify` (reuses the same `selfVerifier`
+   the `/userinfo` handler uses — no JWKS HTTP fetch needed; the IdP
+   verifies its own tokens locally via `KeyStoreResolver`)
+2. Token's `scope` claim must contain `admin`
+3. Token's `sub` (user UUID) must have `is_admin=true` in the DB
+
+The third check catches the case where someone is demoted between consent
+and the API call: the token still validates and has the scope, but the
+runtime DB lookup fails. Without this, demotion wouldn't take effect
+until the access token expired.
+
+The consent flow has a complementary upstream gate (`internal/http/consent.go`):
+when a non-admin user requests `admin` scope at `/authorize`, the consent
+handler silently filters it out before granting. The user gets a token
+without `admin` in scope rather than an error page — better UX than "you
+can't have admin", since most of the time the SPA just requested a
+superset and doesn't actually need it.
+
+### Refresh-token reuse grace (`internal/oauth/refresh_grace.go`)
+30-second in-memory cache keyed by `sha256(refresh_token_plaintext)`. On
+the first successful rotation, the marshaled `tokenResponse` is cached
+(including the rotated refresh_token). If the same plaintext is presented
+again within the window, the IdP returns the cached body verbatim —
+both racing clients converge on the same access_token + new refresh_token.
+
+Solves the canonical browser-SPA race: React StrictMode double-mounts an
+effect (in dev), tab-focus fires `accessTokenExpiring` while a parallel
+fetch already kicked off renewal, network retry resends a still-in-flight
+refresh request. Without the grace window, the second presentation hits
+strict-rotation invalidation and the SPA surfaces "refresh token invalid"
+even though one of the two calls succeeded.
+
+In-memory only; lost on IdP restart. Acceptable cost — a 30s window
+through a restart is rare and the worst case is one client gets
+`invalid_grant` and re-auths.
+
+### web SPA (`web/`)
+Vite + React 18 + TypeScript (strict) + Tailwind v4. Two route trees in
+one app:
+- `/`, `/callback`, `/docs/*` — docs product
+- `/admin/{,users,groups,outbox}` — IdP admin, scope-gated
+
+Auth is `react-oidc-context` over `oidc-client-ts`. Tokens stored
+in-memory only (no localStorage / sessionStorage). Silent renewal via
+the refresh-token grant; the IdP's grace window absorbs the client
+race.
+
+Dev proxy (`vite.config.ts`) rewrites `/api/docs` → `:8083/` and
+`/api/admin` → `:8080/admin/api/` so the SPA calls same-origin in dev.
+Production deploys can keep the cross-origin split (`ALLOWED_ORIGINS` on
+each backend) or front-proxy both behind one nginx.
+
+Permission tiers (owner / editor / viewer) come back on every doc/folder
+response from docs-api as a `permission` field; the SPA uses
+`canEdit(perm)` / `canDelete(perm)` helpers to show/hide affordances.
+Backend re-checks on every mutation — UI gating is for UX, not security.
 
 ### OpenFGA
-External OSS service run via docker-compose (`openfga/openfga:latest`, postgres
-storage backend). We don't modify it; we're learning the consumer-correct patterns.
+External OSS service run via docker-compose (`openfga/openfga:v1.14.2`,
+postgres storage backend). We don't modify it; we're learning the
+consumer-correct patterns. Pinned to v1.14.2 because v1.10+ honors the
+`OnDuplicateWrites=ignore` / `OnMissingDeletes=ignore` flags the worker
+sends; v1.9.x silently ignored them and returned hard errors on benign
+duplicate writes / missing deletes.
 
-Two OpenFGA APIs we'll use:
-- `Write` (called by outbox-worker) to write tuples
-- `Check` (called by docs-api handlers) to authorize specific operations
+Two OpenFGA APIs we use:
+- `Write` (called by outbox-worker) to write/delete tuples (one atomic
+  request can carry both)
+- `Check` (called by docs-api + admin API handlers) to authorize specific
+  operations
 
-Optional later: `Expand` for debug/explainability, `BatchCheck` for performance.
+Optional later: `Expand` for debug/explainability, `BatchCheck` for
+performance, `ListObjects` to filter list endpoints at the authz tier.
 
 ## Authorization code + PKCE, in detail
 

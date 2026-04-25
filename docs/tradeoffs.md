@@ -7,9 +7,9 @@ made during implementation + items explicitly flagged for later review.
 
 - **JWT access tokens, no introspection**
 - **Outbox pattern for FGA sync**
-- **Refresh token rotation, Level 2** (no reuse detection yet)
+- **Refresh token rotation (Level 2) with 30s reuse grace, no family-graph yet**
 - **Separate Postgres databases for IdP and OpenFGA**
-- **Basic HTML for login + consent, no admin UI**
+- **Server-rendered HTML for login + consent, SPA for product surfaces** (docs UI + admin UI both live in `web/`)
 
 ## Resolved during implementation
 
@@ -73,10 +73,12 @@ explicitly pruned) so in-flight tokens verify during the overlap window.
 ### KeyResolver split: internal vs downstream
 Two implementations of `tokens.KeyResolver`:
 - `KeyStoreResolver` (internal): hits Postgres directly. Used by
-  `/userinfo` so the IdP verifies its own tokens with no HTTP round-trip
-  through its own JWKS endpoint.
-- Future docs-api will implement with an HTTP-fetched JWKS cache, exercising
-  the real "downstream signature verification" lesson.
+  `/userinfo` and the IdP's admin API so the IdP verifies its own tokens
+  with no HTTP round-trip through its own JWKS endpoint.
+- `internal/jwks.Cache` (downstream): HTTP-fetched JWKS with per-issuer
+  caching, refresh-on-unknown-kid, TTL + stale-if-error. Used by
+  `cmd/docs-api`. Real "downstream signature verification" lesson lives
+  here.
 
 ### CSRF: gorilla/csrf + plaintext-HTTP workaround
 Library choice: gorilla/csrf. We don't roll our own token scheme.
@@ -121,17 +123,52 @@ Similarly at `/userinfo`:
 - Unknown user (deleted after token issuance) → `invalid_token`, not a
   distinct "user not found" — treat as "token no longer valid."
 
+### Refresh-token reuse grace window (30s)
+When the same refresh-token plaintext is presented twice within 30s of a
+successful rotation, the second call returns the cached response instead
+of `invalid_grant`. Solves the canonical browser-SPA race (StrictMode
+double-mount, tab refocus, network retry). In-memory cache, hashed keys,
+TTL-bounded. Implementation: `internal/oauth/refresh_grace.go`. Allowed
+by the OAuth 2.1 BCP draft when the window is short and bounded.
+
+### Admin scope gating: dual-layer (consent-time filter + runtime is_admin check)
+The `admin` scope is gated twice for defense-in-depth:
+1. **Consent-time filter**: the consent handler silently drops `admin`
+   from the granted scope set when `users.is_admin = false`. The user
+   gets a token without `admin` rather than an error page.
+2. **Runtime check** in admin API middleware: even if the token has
+   `admin` scope, every admin call re-checks `users.GetByID(claims.Sub).IsAdmin`.
+   Catches the case where someone is demoted between consent and request.
+
+Either gate alone would work; both gates together let demotion take
+effect immediately (no waiting for token expiry).
+
+### Admin API redirect URI reuse
+Lab shortcut: the `/logout` handler validates `post_logout_redirect_uri`
+against the client's `redirect_uris` allowlist instead of a separate
+`post_logout_redirect_uris` field. Production OIDC IdPs maintain the two
+allowlists separately. Documented at `internal/http/logout.go`.
+
+### docs-api `aud=client_id` shortcut
+The IdP issues access tokens with `aud=<client_id>` rather than
+`aud=<resource-server>`. docs-api's `REQUIRED_AUD` must therefore match
+the client id. Production IdPs would issue per-resource audiences via
+RFC 8707 resource indicators. Documented at the SPA's
+`scripts/docs_smoke.sh` and in dev_workflow.md.
+
 ## Pending / to be decided later
 
-### Outbox worker batch size + sleep (layer 8)
-Plan: 100 rows per batch, 1s sleep on empty. Adjust based on observed lag
-once the worker is wired up. Stretch: `LISTEN/NOTIFY` on the outbox table
-so the worker wakes immediately on new rows instead of polling.
+### Outbox worker `LISTEN/NOTIFY`
+Currently 1s polling. `LISTEN/NOTIFY` on the outbox table would let the
+worker wake immediately on new rows. Polling is fine at lab scale.
 
-### Refresh token reuse detection (Level 3)
+### Refresh token reuse detection (Level 3, family-graph)
 Schema supports it via `rotated_from`. Promote when we want to simulate
-the stolen-token scenario — reused refresh token invalidates the whole
-rotation chain.
+the stolen-token scenario — reused refresh token *outside* the grace
+window invalidates the whole rotation chain. The 30s grace window
+co-exists cleanly with this: same-token reuse within window → cache hit
+(intended); same-token reuse outside window → invalidate chain
+(stolen-token signal).
 
 ### Introspection endpoint (RFC 7662)
 Add if we ever need revocation latency < access-token expiry. JWT + 15m

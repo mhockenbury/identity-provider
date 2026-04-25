@@ -7,6 +7,11 @@ project; numbers would be noise.
 Each objective is either **covered by core** (guaranteed by the implementation
 plan) or **covered by stretch** (only if the subproject extends past core).
 
+**Status as of subproject 2 close-out:** all primary objectives ✓ landed.
+3 of 4 named gaps ✓ (DPoP carries forward). Stretch UIs ✓ (docs SPA + admin UI),
+refresh-grace ✓. WebAuthn / DPoP / token-exchange / family-graph reuse-detection
+deferred to follow-on subprojects.
+
 ## Primary objectives
 
 ### OIDC authorization code flow with PKCE from the inside
@@ -14,35 +19,31 @@ Understand *why* each flow parameter exists, not just what the spec says.
 Expect to be able to explain: why `state`, why PKCE even for confidential
 clients, what `nonce` protects, why ID tokens are signed but opaque to APIs.
 
-**Covered by:** core. `internal/oauth/authorize.go`, `internal/oauth/token.go`.
-**Verified by:** oidc-client-ts browser smoke test completing a full flow.
+**Covered by:** core. `internal/oauth/authorize.go`, `internal/oauth/token.go`, `internal/http/login.go`, `internal/http/consent.go`. **Status: ✓**
+**Verified by:** `scripts/dev_flow.sh` (curl-driven) + the `web/` SPA's `Sign in` button (browser-driven, oidc-client-ts).
 
 ### JWT + JWKS key management
 Signing, `kid` lookup, public key distribution, key rotation mechanics,
 client-side JWKS caching with refresh-on-unknown-kid.
 
-**Covered by:** core. `internal/tokens/*`, `/.well-known/jwks.json`, docs-api
-JWKS cache.
-**Verified by:** docs-api validates tokens across a simulated key rotation
-(IdP rotates signing key; docs-api refetches JWKS on cache miss for new kid).
+**Covered by:** core. `internal/tokens/keys.go` (3-state PENDING/ACTIVE/RETIRED with partial unique index), `internal/tokens/jwks.go` (wire format), `internal/tokens/jwt.go` (signer + verifier with kid lookup), `internal/jwks/cache.go` (HTTP-fetched cache with refresh-on-unknown-kid). **Status: ✓**
+**Verified by:** `internal/jwks/cache_test.go::TestResolve_UnknownKid_TriggersRefetch` (rotation path), `TestIntegration_VerifierAcceptsFetchedKey` (full integration with a real EdDSA JWT).
 
 ### Refresh token rotation (Level 2)
 Each refresh invalidates the old refresh token and issues a new one.
 Requires a DB schema that tracks rotation state.
 
-**Covered by:** core. `internal/tokens/refresh.go`, `refresh_tokens` table
-with `rotated_from` self-ref.
-**Verified by:** test that reusing a rotated refresh token returns
-`invalid_grant`.
+**Covered by:** core. `internal/tokens/refresh.go` (Rotate uses BEGIN tx + SELECT FOR UPDATE), schema in migration 0001 with `rotated_from` self-ref. **Status: ✓**
+**Plus:** 30-second reuse grace window (`internal/oauth/refresh_grace.go`) to handle the canonical browser-SPA race where parallel calls present the same token.
+**Verified by:** 8-goroutine concurrent rotate test in `refresh_test.go` proves exactly one wins; live race test of 2 parallel + 1 sequential `/token` POSTs all returning byte-identical 200 responses.
 
 ### Outbox pattern for eventual consistency
 Transactional identity state + pending outbox row, async worker drains
 to downstream (FGA). The realistic pattern for "do one thing atomically,
 propagate eventually."
 
-**Covered by:** core. `internal/outbox/*`, `cmd/outbox-worker/main.go`.
-**Verified by:** add a user to a group via the IdP, observe the FGA tuple
-appear within O(1s) without either system blocking the other.
+**Covered by:** core. `internal/outbox/{events,store,translate}.go` (`Enqueue(ctx, tx, event)` insists on a `pgx.Tx` so atomicity is compile-time-enforced), `cmd/outbox-worker/main.go` (claim batch via `SELECT FOR UPDATE SKIP LOCKED`, per-tuple coalescing across batch, attempt_count cap with poison-pill quarantine). **Status: ✓**
+**Verified by:** `scripts/docs_smoke.sh` end-to-end + `internal/outbox/*_test.go` unit tests; also exercised live via the admin UI's group-membership-CRUD which writes an outbox row, drained within ~1s.
 
 ## Named learning gaps (matt's weak areas)
 
@@ -52,11 +53,8 @@ In real systems you may accept tokens from your own IdP *and* an upstream
 or sibling IdP. This forces: per-issuer JWKS cache, `iss` allowlist, handling
 `kid` collisions between issuers.
 
-**Covered by:** core. docs-api configured with two trusted issuers (our IdP
-+ a mock second one, e.g., a simple second IdP instance with its own keys).
-**Verified by:** docs-api accepts tokens from either issuer, rejects tokens
-with valid signatures from the wrong issuer (e.g., mock issuer's token used
-against an endpoint that only trusts our IdP — and vice versa).
+**Covered by:** core. The `tokens.Verifier` takes `map[string]KeyResolver` as the issuer allowlist; `cmd/docs-api/main.go` builds one `jwks.Cache` per `TRUSTED_ISSUERS` entry. **Status: ✓** (mechanism in place; second-issuer integration test would be a 1-line config change to spin up a second IdP).
+**Verified by:** `cmd/docs-api/auth_test.go::TestAuthenticate_UnknownIssuer_401` (token from a legitimate-but-untrusted issuer is rejected before key resolution); `internal/jwks/cache_test.go::TestIntegration_VerifierAcceptsFetchedKey` (real cross-process JWKS fetch + token validation).
 
 ### Downstream signature verification
 docs-api validates tokens entirely locally — it never calls the IdP per-
@@ -64,12 +62,12 @@ request. This is how production services work and is where JWT + JWKS
 earn their complexity budget. Covers: signature, `exp`, `iss`, `aud`,
 scope presence.
 
-**Covered by:** core. `cmd/docs-api`'s token-validating middleware.
+**Covered by:** core. `cmd/docs-api/auth.go` (`authenticate` middleware), `cmd/docs-api/main.go` (per-issuer `jwks.Cache` wiring). **Status: ✓**
 **Verified by:**
-- Forged-token test case (sign with a local random key, assert rejection)
-- JWKS-cache-miss test case (IdP rotates, docs-api's cache has only the old
-  `kid`; the new `kid` triggers a refetch; subsequent tokens work)
-- Expired-token test case (exp in the past, assert rejection)
+- `cmd/docs-api/auth_test.go::TestAuthenticate_ExpiredToken_401` (expired token rejected)
+- `internal/jwks/cache_test.go::TestResolve_UnknownKid_TriggersRefetch` (rotation path: cache has only old kid, new kid triggers refetch, subsequent tokens validate)
+- `cmd/docs-api/auth_test.go::TestAuthenticate_HappyPath_PopulatesClaims` (signature verify succeeds, claims appear in ctx)
+- `cmd/docs-api/auth_test.go::TestAuthenticate_WrongAudience_401` + `TestAuthenticate_UnknownIssuer_401` (every standard claim rejection path)
 
 ### Scope-based authz (vs FGA authz)
 The subtle distinction most engineers miss: *scope* is what the user+client
@@ -77,13 +75,12 @@ has been *allowed to ask for* (set at consent time, encoded in the token).
 *Authz* is what this specific access can actually do (FGA check at request
 time). Both are needed; they're not redundant.
 
-**Covered by:** core. `cmd/docs-api` enforces scope in middleware
-(fast-fail) and FGA check in handler (fine-grained).
+**Covered by:** core. `cmd/docs-api/auth.go::requireScope("read:docs"|"write:docs")` in middleware (fast-fail before any DB/FGA work) + `cmd/docs-api/handlers.go::resolvePermission` in handler (fine-grained tier check via FGA). Same split on the IdP's admin API: `internal/http/admin/middleware.go` requires `admin` scope, then defense-in-depth `is_admin=true` lookup. **Status: ✓**
 **Verified by:**
-- Request with `read:docs` scope but no viewer tuple on the specific doc
-  → 403 (scope present, FGA denies)
-- Request without `read:docs` scope → 403 (scope missing, FGA never called)
-- Design doc paragraph in README §6 explicitly contrasting the two
+- `cmd/docs-api/handlers_test.go::TestUpdateDoc_ReadScope_403` (correct scope is write:docs; read:docs alone returns 403 even with editor tuple)
+- `cmd/docs-api/handlers_test.go::TestGetDoc_NotViewer_404` (scope present, FGA denies → 404 by design)
+- `internal/http/admin/middleware_test.go::TestAuthenticate_NoAdminScope_403` + `TestAuthenticate_AdminScopeButNotIsAdmin_403` (the dual gate in action)
+- README §6 "JWT access tokens" + the new "scope vs FGA" reasoning in `cmd/docs-api/handlers.go`'s package comment
 
 ### Token binding (DPoP)
 Stretch. The goal isn't a full RFC 9449 implementation; it's to feel why
@@ -129,38 +126,30 @@ one before calling a hypothetical second downstream service.
 ### Dynamic client registration (RFC 7591)
 Likely skipped. Admin UI would fit better first.
 
-### Client application / SPA integration
-Currently the browser flow ends at the client's registered `redirect_uri`
-(`http://localhost:5173/callback`) with "Unable to connect" — nothing is
-listening there. The curl-driven `make dev-flow` exercises the full path,
-but a browser-driven demo dead-ends at the callback.
+### Client application / SPA integration — ✓ DONE
+The full SPA shipped at `web/`. Vite + React + TypeScript + Tailwind
++ `react-oidc-context` (over `oidc-client-ts`) + TanStack Query.
+**Status: ✓**
 
-Two escalating options:
+The SPA is a mono-frontend with two route trees:
+- `/` (landing) → `/docs` — docs product UI
+- `/admin/*` — IdP admin UI (scope-gated)
 
-**Lightweight — catch-all callback listener.** A small helper binary
-(Go or Python) that listens on `:5173` and renders the received query
-params + a ready-to-run `curl -X POST /token ...` block. Mirrors what
-a real client backend would do with the code; keeps browser testing
-viable without a full SPA. ~30 lines.
+**Surface covered:**
+- PKCE from the browser (the library handles `crypto.subtle.digest`)
+- In-memory token storage only — no `localStorage` / `sessionStorage`
+  for the tokens themselves (XSS exposure surface)
+- Silent renewal via refresh_token grant + the IdP's reuse-grace window
+- Per-route scope gating (`useHasScope`); admin link hidden when token
+  doesn't have `admin` scope
+- Typed API clients (`web/src/docs/api.ts`, `web/src/admin/api.ts`)
+- React Query for server state + cache invalidation on mutations
+- RP-initiated logout (`signoutRedirect` → IdP `/logout` →
+  `post_logout_redirect_uri` validated against client's allowlist)
 
-**Full — real SPA using `oidc-client-ts`.** A proper single-page app
-(Vite + TypeScript, no framework necessary) that implements the client
-side of PKCE end-to-end: generates verifier + challenge in browser, hits
-/authorize, receives code at /callback, POSTs to /token, stores tokens,
-calls /userinfo, renders claims. Exercises:
-- PKCE from the browser (crypto.subtle.digest for SHA-256)
-- Same-origin token storage decisions (sessionStorage vs IndexedDB vs in-memory)
-- Silent refresh via the refresh_token
-- The library integration itself — oidc-client-ts is what most real SPAs use
-
-**Verified by:** full browser-only round-trip — click login, land back
-in the SPA, see the user's claims rendered. No curl required.
-
-**Value:** this would materially expand what the subproject covers —
-right now we own the IdP and not the client. A client-app companion
-turns the subproject into a demonstrably complete OIDC ecosystem. Good
-portfolio piece if we ever want to show the whole thing to someone.
-Could be its own tiny subproject or folded in here depending on scope.
+**Verified by:** full browser round-trip — sign in, see permission
+badges per doc, edit/delete based on tier, switch to admin, manage
+users/groups/outbox, sign out cleanly.
 
 ---
 
