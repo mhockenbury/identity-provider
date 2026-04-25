@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/mhockenbury/identity-provider/internal/clients"
 	"github.com/mhockenbury/identity-provider/internal/outbox"
 	"github.com/mhockenbury/identity-provider/internal/users"
 )
@@ -22,9 +23,10 @@ import (
 // pluggable points. Tests stub the underlying DB via the same patterns
 // used elsewhere in the repo.
 type Deps struct {
-	Pool   *pgxpool.Pool
-	Users  users.Store
-	Groups *users.GroupStore
+	Pool    *pgxpool.Pool
+	Users   users.Store
+	Groups  *users.GroupStore
+	Clients clients.Store
 }
 
 // MaxAttempts is the worker's poison-pill threshold. Mirrored here so
@@ -52,6 +54,13 @@ func Handler(d Deps) http.Handler {
 	r.Get("/outbox", listOutbox(d))
 	r.Post("/outbox/{id}/retry", retryOutbox(d))
 	r.Delete("/outbox/{id}", purgeOutbox(d))
+
+	r.Get("/clients", listClients(d))
+	r.Post("/clients", createClient(d))
+	r.Get("/clients/{id}", getClient(d))
+	r.Patch("/clients/{id}", updateClient(d))
+	r.Post("/clients/{id}/rotate-secret", rotateClientSecret(d))
+	r.Delete("/clients/{id}", deleteClient(d))
 
 	return r
 }
@@ -495,6 +504,194 @@ func purgeOutbox(d Deps) http.HandlerFunc {
 		}
 		if tag.RowsAffected() == 0 {
 			writeError(w, http.StatusNotFound, "not_found", "row not found")
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+// --- clients ---
+//
+// CRITICAL: client secrets are shown to the caller in plaintext ONLY on
+// create + rotate-secret. Subsequent reads expose only `secret_set: bool`.
+// The plaintext is never persisted (only the argon2id hash) and never
+// logged. This mirrors how every real IdP exposes client credentials.
+
+type clientView struct {
+	ID            string   `json:"id"`
+	IsPublic      bool     `json:"is_public"`
+	SecretSet     bool     `json:"secret_set"` // confidential clients with a hash on file
+	RedirectURIs  []string `json:"redirect_uris"`
+	AllowedGrants []string `json:"allowed_grants"`
+	AllowedScopes []string `json:"allowed_scopes"`
+	CreatedAt     string   `json:"created_at"`
+}
+
+// clientCreatedView is the create / rotate-secret response shape. Embeds
+// the regular client view + the plaintext secret. Caller MUST surface this
+// to the human now — it will never be retrievable again.
+type clientCreatedView struct {
+	clientView
+	PlaintextSecret string `json:"plaintext_secret,omitempty"`
+}
+
+func toClientView(c clients.Client) clientView {
+	return clientView{
+		ID:            c.ID,
+		IsPublic:      c.IsPublic,
+		SecretSet:     c.SecretHash != "",
+		RedirectURIs:  c.RedirectURIs,
+		AllowedGrants: c.AllowedGrants,
+		AllowedScopes: c.AllowedScopes,
+		CreatedAt:     c.CreatedAt.UTC().Format("2006-01-02T15:04:05Z"),
+	}
+}
+
+func listClients(d Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		all, err := d.Clients.List(r.Context())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "server_error", err.Error())
+			return
+		}
+		out := make([]clientView, 0, len(all))
+		for _, c := range all {
+			out = append(out, toClientView(c))
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"clients": out})
+	}
+}
+
+func getClient(d Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := chi.URLParam(r, "id")
+		c, err := d.Clients.GetByID(r.Context(), id)
+		if err != nil {
+			if errors.Is(err, clients.ErrNotFound) {
+				writeError(w, http.StatusNotFound, "not_found", "client not found")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "server_error", err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, toClientView(c))
+	}
+}
+
+func createClient(d Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			ID            string   `json:"id"`
+			IsPublic      bool     `json:"is_public"`
+			RedirectURIs  []string `json:"redirect_uris"`
+			AllowedGrants []string `json:"allowed_grants"`
+			AllowedScopes []string `json:"allowed_scopes"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "bad_request", "malformed JSON")
+			return
+		}
+		if req.ID == "" {
+			writeError(w, http.StatusBadRequest, "bad_request", "id required")
+			return
+		}
+		if len(req.RedirectURIs) == 0 {
+			writeError(w, http.StatusBadRequest, "bad_request", "at least one redirect_uri required")
+			return
+		}
+		// Default to authorization_code + refresh_token when grants
+		// aren't supplied — the only grant types this IdP supports anyway.
+		if len(req.AllowedGrants) == 0 {
+			req.AllowedGrants = []string{"authorization_code", "refresh_token"}
+		}
+
+		c := clients.Client{
+			ID:            req.ID,
+			IsPublic:      req.IsPublic,
+			RedirectURIs:  req.RedirectURIs,
+			AllowedGrants: req.AllowedGrants,
+			AllowedScopes: req.AllowedScopes,
+		}
+		saved, plaintext, err := d.Clients.Create(r.Context(), c)
+		if err != nil {
+			switch {
+			case errors.Is(err, clients.ErrIDTaken):
+				writeError(w, http.StatusConflict, "id_taken", "client id already in use")
+			case errors.Is(err, clients.ErrInvalidClientShape):
+				writeError(w, http.StatusBadRequest, "invalid_shape", err.Error())
+			default:
+				writeError(w, http.StatusInternalServerError, "server_error", err.Error())
+			}
+			return
+		}
+		writeJSON(w, http.StatusCreated, clientCreatedView{
+			clientView:      toClientView(saved),
+			PlaintextSecret: plaintext, // empty for public clients
+		})
+	}
+}
+
+func updateClient(d Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := chi.URLParam(r, "id")
+		var req struct {
+			RedirectURIs  []string `json:"redirect_uris"`
+			AllowedGrants []string `json:"allowed_grants"`
+			AllowedScopes []string `json:"allowed_scopes"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "bad_request", "malformed JSON")
+			return
+		}
+		if len(req.RedirectURIs) == 0 {
+			writeError(w, http.StatusBadRequest, "bad_request", "at least one redirect_uri required")
+			return
+		}
+		updated, err := d.Clients.Update(r.Context(), id,
+			req.RedirectURIs, req.AllowedGrants, req.AllowedScopes)
+		if err != nil {
+			if errors.Is(err, clients.ErrNotFound) {
+				writeError(w, http.StatusNotFound, "not_found", "client not found")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "server_error", err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, toClientView(updated))
+	}
+}
+
+func rotateClientSecret(d Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := chi.URLParam(r, "id")
+		updated, plaintext, err := d.Clients.RotateSecret(r.Context(), id)
+		if err != nil {
+			switch {
+			case errors.Is(err, clients.ErrNotFound):
+				writeError(w, http.StatusNotFound, "not_found", "client not found")
+			case errors.Is(err, clients.ErrInvalidClientShape):
+				writeError(w, http.StatusBadRequest, "invalid_shape", "public clients have no secret")
+			default:
+				writeError(w, http.StatusInternalServerError, "server_error", err.Error())
+			}
+			return
+		}
+		writeJSON(w, http.StatusOK, clientCreatedView{
+			clientView:      toClientView(updated),
+			PlaintextSecret: plaintext,
+		})
+	}
+}
+
+func deleteClient(d Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := chi.URLParam(r, "id")
+		if err := d.Clients.Delete(r.Context(), id); err != nil {
+			if errors.Is(err, clients.ErrNotFound) {
+				writeError(w, http.StatusNotFound, "not_found", "client not found")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "server_error", err.Error())
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)

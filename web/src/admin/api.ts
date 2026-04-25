@@ -165,3 +165,92 @@ export async function purgeOutbox(
     throw new Error(`HTTP ${r.status}: ${body || r.statusText}`);
   }
 }
+
+// --- clients ---
+
+export type AdminClient = {
+  id: string;
+  is_public: boolean;
+  secret_set: boolean;
+  redirect_uris: string[];
+  allowed_grants: string[];
+  allowed_scopes: string[];
+  created_at: string;
+};
+
+// Returned by create + rotate-secret. The plaintext is shown to the user
+// EXACTLY ONCE — it isn't returned by getClient or listClients.
+export type AdminClientCreated = AdminClient & {
+  plaintext_secret?: string;
+};
+
+export async function listClients(fetch: AuthedFetch): Promise<AdminClient[]> {
+  const r = await fetch(`${BASE}/clients`);
+  const body = await parseOrThrow<{ clients: AdminClient[] }>(r);
+  return body.clients;
+}
+
+export async function getClient(
+  fetch: AuthedFetch,
+  id: string,
+): Promise<AdminClient> {
+  const r = await fetch(`${BASE}/clients/${encodeURIComponent(id)}`);
+  return parseOrThrow<AdminClient>(r);
+}
+
+export async function createClient(
+  fetch: AuthedFetch,
+  req: {
+    id: string;
+    is_public: boolean;
+    redirect_uris: string[];
+    allowed_grants?: string[];
+    allowed_scopes: string[];
+  },
+): Promise<AdminClientCreated> {
+  const r = await fetch(`${BASE}/clients`, {
+    method: "POST",
+    body: JSON.stringify(req),
+  });
+  return parseOrThrow<AdminClientCreated>(r);
+}
+
+export async function updateClient(
+  fetch: AuthedFetch,
+  id: string,
+  req: {
+    redirect_uris: string[];
+    allowed_grants: string[];
+    allowed_scopes: string[];
+  },
+): Promise<AdminClient> {
+  const r = await fetch(`${BASE}/clients/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify(req),
+  });
+  return parseOrThrow<AdminClient>(r);
+}
+
+export async function rotateClientSecret(
+  fetch: AuthedFetch,
+  id: string,
+): Promise<AdminClientCreated> {
+  const r = await fetch(
+    `${BASE}/clients/${encodeURIComponent(id)}/rotate-secret`,
+    { method: "POST" },
+  );
+  return parseOrThrow<AdminClientCreated>(r);
+}
+
+export async function deleteClient(
+  fetch: AuthedFetch,
+  id: string,
+): Promise<void> {
+  const r = await fetch(`${BASE}/clients/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+  if (!r.ok && r.status !== 204) {
+    const body = await r.text();
+    throw new Error(`HTTP ${r.status}: ${body || r.statusText}`);
+  }
+}

@@ -40,6 +40,9 @@ export function AdminLayout() {
         <NavLink to="/admin/groups" className={linkClass}>
           Groups
         </NavLink>
+        <NavLink to="/admin/clients" className={linkClass}>
+          Clients
+        </NavLink>
         <NavLink to="/admin/outbox" className={linkClass}>
           Outbox
         </NavLink>

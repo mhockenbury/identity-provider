@@ -88,6 +88,12 @@ This is an RFC-driven learning project. Template §2 (capacity estimates) intent
 | GET | `/outbox?status=pending\|failed\|all` | inspect outbox rows |
 | POST | `/outbox/{id}/retry` | reset attempt_count for a poison-pill row |
 | DELETE | `/outbox/{id}?force=1` | purge (refuses pending rows without `force=1`) |
+| GET | `/clients` | list OAuth clients (no plaintext secret ever) |
+| POST | `/clients` | create client; plaintext secret in response (ONCE) |
+| GET | `/clients/{id}` | get client (no plaintext secret) |
+| PATCH | `/clients/{id}` | edit redirect_uris / allowed_grants / allowed_scopes |
+| POST | `/clients/{id}/rotate-secret` | mint new secret; plaintext in response (ONCE) |
+| DELETE | `/clients/{id}` | delete client (cascades consents + auth_codes) |
 
 ### docs-api endpoints (`cmd/docs-api`, host :8083)
 

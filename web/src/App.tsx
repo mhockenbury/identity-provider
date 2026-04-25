@@ -22,6 +22,7 @@ import { AdminLayout } from "./admin/AdminLayout";
 import { Dashboard } from "./admin/Dashboard";
 import { UsersAdmin } from "./admin/UsersAdmin";
 import { GroupsAdmin } from "./admin/GroupsAdmin";
+import { ClientsAdmin } from "./admin/ClientsAdmin";
 import { OutboxAdmin } from "./admin/OutboxAdmin";
 
 // Single QueryClient for the app. Defaults are fine for now; we'll
@@ -59,6 +60,7 @@ function App() {
                 <Route index element={<Dashboard />} />
                 <Route path="users" element={<UsersAdmin />} />
                 <Route path="groups" element={<GroupsAdmin />} />
+                <Route path="clients" element={<ClientsAdmin />} />
                 <Route path="outbox" element={<OutboxAdmin />} />
               </Route>
             </Route>

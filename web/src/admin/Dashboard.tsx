@@ -3,7 +3,7 @@
 
 import { useQueries } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
-import { listGroups, listOutbox, listUsers } from "./api";
+import { listClients, listGroups, listOutbox, listUsers } from "./api";
 import { useAuthedFetch } from "../auth/useAuthedFetch";
 
 export function Dashboard() {
@@ -12,6 +12,7 @@ export function Dashboard() {
     queries: [
       { queryKey: ["admin", "users"], queryFn: () => listUsers(fetch) },
       { queryKey: ["admin", "groups"], queryFn: () => listGroups(fetch) },
+      { queryKey: ["admin", "clients"], queryFn: () => listClients(fetch) },
       {
         queryKey: ["admin", "outbox", "pending"],
         queryFn: () => listOutbox(fetch, "pending"),
@@ -22,14 +23,15 @@ export function Dashboard() {
       },
     ],
   });
-  const [usersQ, groupsQ, pendingQ, failedQ] = queries;
+  const [usersQ, groupsQ, clientsQ, pendingQ, failedQ] = queries;
 
   return (
     <div>
       <h1 className="text-xl font-semibold">Dashboard</h1>
-      <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-5">
         <Tile to="/admin/users" label="Users" count={usersQ.data?.length} loading={usersQ.isLoading} />
         <Tile to="/admin/groups" label="Groups" count={groupsQ.data?.length} loading={groupsQ.isLoading} />
+        <Tile to="/admin/clients" label="Clients" count={clientsQ.data?.length} loading={clientsQ.isLoading} />
         <Tile
           to="/admin/outbox"
           label="Outbox pending"

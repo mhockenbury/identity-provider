@@ -812,9 +812,10 @@ func runServe() error {
 	// (defense-in-depth against post-issue demotion).
 	adminAPIHandler := admin.Authenticate(selfVerifier, userStore)(
 		admin.Handler(admin.Deps{
-			Pool:   pool,
-			Users:  userStore,
-			Groups: groupStore,
+			Pool:    pool,
+			Users:   userStore,
+			Groups:  groupStore,
+			Clients: clientStore,
 		}),
 	)
 
