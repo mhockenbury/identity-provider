@@ -14,7 +14,7 @@ VALUES (
     -- same redirect_uris list (lab shortcut; see docs/tradeoffs.md).
     ARRAY['http://localhost:5173/callback', 'http://localhost:5173/', 'http://localhost:8080/debug/callback'],
     ARRAY['authorization_code', 'refresh_token'],
-    ARRAY['openid', 'profile', 'email', 'read:docs', 'write:docs', 'admin:users'],
+    ARRAY['openid', 'profile', 'email', 'read:docs', 'write:docs', 'admin'],
     TRUE
 )
 ON CONFLICT (id) DO NOTHING;

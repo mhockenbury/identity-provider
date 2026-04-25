@@ -50,6 +50,23 @@ func (f *fakeUserStore) Authenticate(ctx context.Context, email, password string
 	}
 	return u, nil
 }
+func (f *fakeUserStore) List(ctx context.Context) ([]users.User, error) {
+	out := make([]users.User, 0, len(f.users))
+	for _, u := range f.users {
+		out = append(out, u)
+	}
+	return out, nil
+}
+func (f *fakeUserStore) SetAdmin(ctx context.Context, id uuid.UUID, isAdmin bool) error {
+	for email, u := range f.users {
+		if u.ID == id {
+			u.IsAdmin = isAdmin
+			f.users[email] = u
+			return nil
+		}
+	}
+	return users.ErrNotFound
+}
 
 func newLoginFixture(t *testing.T) (myhttp.LoginConfig, *fakeUserStore, *fakeSessionStore) {
 	t.Helper()

@@ -7,7 +7,9 @@
 //   idp keys activate <kid>                         — transition PENDING → ACTIVE
 //   idp keys retire   <kid>                         — transition ACTIVE → RETIRED
 //   idp users create <email> <pass>                 — create a user (argon2id-hashed password)
-//   idp users list                                  — list all users
+//   idp users list                                  — list all users (with admin flag)
+//   idp users promote <email>                       — set is_admin=true (gates `admin` scope)
+//   idp users demote <email>                        — set is_admin=false
 //   idp groups create <name>                        — create a group
 //   idp groups list                                  — list all groups
 //   idp groups add-member <group> <user-email>       — add user to group (enqueues outbox event)
@@ -51,6 +53,7 @@ import (
 	"github.com/mhockenbury/identity-provider/internal/consent"
 	"github.com/mhockenbury/identity-provider/internal/fga"
 	myhttp "github.com/mhockenbury/identity-provider/internal/http"
+	"github.com/mhockenbury/identity-provider/internal/http/admin"
 	"github.com/mhockenbury/identity-provider/internal/oauth"
 	"github.com/mhockenbury/identity-provider/internal/oidc"
 	"github.com/mhockenbury/identity-provider/internal/outbox"
@@ -608,34 +611,59 @@ func runUsers(args []string) error {
 		return nil
 
 	case "list":
-		const q = `SELECT id, email, created_at FROM users ORDER BY created_at DESC`
-		rows, err := pool.Query(ctx, q)
+		all, err := store.List(ctx)
 		if err != nil {
-			return fmt.Errorf("query users: %w", err)
+			return fmt.Errorf("list users: %w", err)
 		}
-		defer rows.Close()
-
-		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(w, "ID\tEMAIL\tCREATED_AT")
-		count := 0
-		for rows.Next() {
-			var id uuid.UUID
-			var email string
-			var createdAt time.Time
-			if err := rows.Scan(&id, &email, &createdAt); err != nil {
-				return fmt.Errorf("scan user: %w", err)
-			}
-			fmt.Fprintf(w, "%s\t%s\t%s\n", id, email, createdAt.Format(time.RFC3339))
-			count++
-		}
-		if err := rows.Err(); err != nil {
-			return fmt.Errorf("iterate users: %w", err)
-		}
-		if count == 0 {
+		if len(all) == 0 {
 			fmt.Println("(no users — run: idp users create <email> <password>)")
 			return nil
 		}
+		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+		fmt.Fprintln(w, "ID\tEMAIL\tADMIN\tCREATED_AT")
+		for _, u := range all {
+			fmt.Fprintf(w, "%s\t%s\t%v\t%s\n",
+				u.ID, u.Email, u.IsAdmin, u.CreatedAt.Format(time.RFC3339))
+		}
 		return w.Flush()
+
+	case "promote":
+		if len(args) < 2 {
+			return usageErr("users promote: need <email>")
+		}
+		email := args[1]
+		u, err := store.GetByEmail(ctx, email)
+		if err != nil {
+			return fmt.Errorf("lookup %q: %w", email, err)
+		}
+		if u.IsAdmin {
+			fmt.Printf("user %s is already admin\n", u.Email)
+			return nil
+		}
+		if err := store.SetAdmin(ctx, u.ID, true); err != nil {
+			return fmt.Errorf("promote: %w", err)
+		}
+		fmt.Printf("promoted %s to admin\n", u.Email)
+		return nil
+
+	case "demote":
+		if len(args) < 2 {
+			return usageErr("users demote: need <email>")
+		}
+		email := args[1]
+		u, err := store.GetByEmail(ctx, email)
+		if err != nil {
+			return fmt.Errorf("lookup %q: %w", email, err)
+		}
+		if !u.IsAdmin {
+			fmt.Printf("user %s is not admin\n", u.Email)
+			return nil
+		}
+		if err := store.SetAdmin(ctx, u.ID, false); err != nil {
+			return fmt.Errorf("demote: %w", err)
+		}
+		fmt.Printf("demoted %s\n", u.Email)
+		return nil
 
 	default:
 		return usageErr(fmt.Sprintf("users: unknown subcommand %q", args[0]))
@@ -704,6 +732,7 @@ func runServe() error {
 	consentStore := consent.NewPostgresStore(pool)
 	codeStore := oauth.NewPostgresAuthCodeStore(pool)
 	refreshStore := tokens.NewPostgresRefreshTokenStore(pool)
+	groupStore := users.NewGroupStore(pool)
 	signer := tokens.NewSigner(keyStore, kek, cfg.issuerURL, nil)
 
 	templates, err := myhttp.ParseTemplates()
@@ -777,6 +806,18 @@ func runServe() error {
 		UserStore: &userInfoOIDCAdapter{store: userStore},
 	}
 
+	// Stretch: admin JSON API. Reuses the IdP's own self-verifier — the
+	// admin tokens are issued by this IdP and verified locally, no JWKS
+	// HTTP call. Auth middleware checks scope=admin AND is_admin=true
+	// (defense-in-depth against post-issue demotion).
+	adminAPIHandler := admin.Authenticate(selfVerifier, userStore)(
+		admin.Handler(admin.Deps{
+			Pool:   pool,
+			Users:  userStore,
+			Groups: groupStore,
+		}),
+	)
+
 	indexCfg := myhttp.IndexConfig{
 		Templates: templates,
 		Users:     userStore,
@@ -790,7 +831,7 @@ func runServe() error {
 	router := myhttp.New(myhttp.RouterConfig{
 		Discovery: oidc.DiscoveryConfig{
 			Issuer:          cfg.issuerURL,
-			ScopesSupported: []string{"openid", "profile", "email", "read:docs", "write:docs", "admin:users"},
+			ScopesSupported: []string{"openid", "profile", "email", "read:docs", "write:docs", "admin"},
 		},
 		KeyStore:     keyStore,
 		PostgresPing: func() error { return pool.Ping(context.Background()) },
@@ -809,6 +850,7 @@ func runServe() error {
 		Token:          oauth.Token(tokenCfg),
 		UserInfo:       oidc.UserInfoHandler(userInfoCfg),
 		AllowedOrigins: cfg.allowedOrigins,
+		AdminAPI:       adminAPIHandler,
 	})
 
 	srv := &nethttp.Server{
@@ -1142,7 +1184,9 @@ Subcommands:
   keys activate <kid>               PENDING -> ACTIVE (at most one active)
   keys retire <kid>                 ACTIVE  -> RETIRED
   users create <email> <password>   create a user (argon2id-hashed)
-  users list                        show all users
+  users list                        show all users (with admin flag)
+  users promote <email>             set is_admin=true (gates the 'admin' scope)
+  users demote <email>              set is_admin=false
   groups create <name>              create a group
   groups list                       show all groups
   groups add-member <grp> <email>   add user (enqueues FGA outbox event)

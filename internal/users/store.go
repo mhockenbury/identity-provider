@@ -33,6 +33,10 @@ type User struct {
 	Email        string
 	PasswordHash string
 	CreatedAt    time.Time
+	// IsAdmin gates the `admin` OAuth scope at consent time and the
+	// admin API middleware. Default false; flipped via `idp users
+	// promote` (CLI) or POST /admin/api/users/{id}/promote (API).
+	IsAdmin      bool
 }
 
 // Store is the users package's persistence surface. Tests + handlers depend
@@ -41,6 +45,8 @@ type Store interface {
 	Create(ctx context.Context, email, password string) (User, error)
 	GetByEmail(ctx context.Context, email string) (User, error)
 	GetByID(ctx context.Context, id uuid.UUID) (User, error)
+	List(ctx context.Context) ([]User, error)
+	SetAdmin(ctx context.Context, id uuid.UUID, isAdmin bool) error
 	// Authenticate is a convenience that GetByEmail + VerifyPassword; returns
 	// ErrNotFound or ErrPasswordMismatch on failure. Callers should treat both
 	// as "invalid credentials" to avoid leaking user enumeration.
@@ -89,11 +95,11 @@ func (s *PostgresStore) Create(ctx context.Context, email, password string) (Use
 	const q = `
         INSERT INTO users (email, password_hash)
         VALUES ($1, $2)
-        RETURNING id, email, password_hash, created_at`
+        RETURNING id, email, password_hash, created_at, is_admin`
 
 	var u User
 	err = s.pool.QueryRow(ctx, q, email, hash).Scan(
-		&u.ID, &u.Email, &u.PasswordHash, &u.CreatedAt)
+		&u.ID, &u.Email, &u.PasswordHash, &u.CreatedAt, &u.IsAdmin)
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == pgUniqueViolation {
@@ -109,13 +115,13 @@ func (s *PostgresStore) GetByEmail(ctx context.Context, email string) (User, err
 	email = strings.ToLower(strings.TrimSpace(email))
 
 	const q = `
-        SELECT id, email, password_hash, created_at
+        SELECT id, email, password_hash, created_at, is_admin
         FROM users
         WHERE email = $1`
 
 	var u User
 	err := s.pool.QueryRow(ctx, q, email).Scan(
-		&u.ID, &u.Email, &u.PasswordHash, &u.CreatedAt)
+		&u.ID, &u.Email, &u.PasswordHash, &u.CreatedAt, &u.IsAdmin)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return User{}, ErrNotFound
@@ -128,13 +134,13 @@ func (s *PostgresStore) GetByEmail(ctx context.Context, email string) (User, err
 // GetByID returns the user row for a UUID. Used by session resolution.
 func (s *PostgresStore) GetByID(ctx context.Context, id uuid.UUID) (User, error) {
 	const q = `
-        SELECT id, email, password_hash, created_at
+        SELECT id, email, password_hash, created_at, is_admin
         FROM users
         WHERE id = $1`
 
 	var u User
 	err := s.pool.QueryRow(ctx, q, id).Scan(
-		&u.ID, &u.Email, &u.PasswordHash, &u.CreatedAt)
+		&u.ID, &u.Email, &u.PasswordHash, &u.CreatedAt, &u.IsAdmin)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return User{}, ErrNotFound
@@ -142,6 +148,45 @@ func (s *PostgresStore) GetByID(ctx context.Context, id uuid.UUID) (User, error)
 		return User{}, fmt.Errorf("get user by id: %w", err)
 	}
 	return u, nil
+}
+
+// List returns all users, ordered by creation time (oldest first).
+// Used by the CLI and the admin JSON API.
+func (s *PostgresStore) List(ctx context.Context) ([]User, error) {
+	const q = `
+        SELECT id, email, password_hash, created_at, is_admin
+        FROM users
+        ORDER BY created_at`
+
+	rows, err := s.pool.Query(ctx, q)
+	if err != nil {
+		return nil, fmt.Errorf("list users: %w", err)
+	}
+	defer rows.Close()
+
+	var out []User
+	for rows.Next() {
+		var u User
+		if err := rows.Scan(&u.ID, &u.Email, &u.PasswordHash, &u.CreatedAt, &u.IsAdmin); err != nil {
+			return nil, fmt.Errorf("scan user row: %w", err)
+		}
+		out = append(out, u)
+	}
+	return out, rows.Err()
+}
+
+// SetAdmin updates the is_admin flag for a user. Returns ErrNotFound if
+// the user doesn't exist.
+func (s *PostgresStore) SetAdmin(ctx context.Context, id uuid.UUID, isAdmin bool) error {
+	const q = `UPDATE users SET is_admin = $2 WHERE id = $1`
+	tag, err := s.pool.Exec(ctx, q, id, isAdmin)
+	if err != nil {
+		return fmt.Errorf("set admin: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // Authenticate combines lookup + password verify. Returns a populated User

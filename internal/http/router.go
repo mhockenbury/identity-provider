@@ -62,10 +62,16 @@ type RouterConfig struct {
 	UserInfo http.HandlerFunc
 
 	// AllowedOrigins enables CORS on the browser-consumable, no-session
-	// endpoints: /.well-known/*, /token, /userinfo. Empty → no CORS
-	// headers. `/authorize` and `/login` are top-level navigations, not
-	// XHR calls, so they don't need CORS.
+	// endpoints: /.well-known/*, /token, /userinfo, /admin/api/*.
+	// Empty → no CORS headers. `/authorize` and `/login` are top-level
+	// navigations, not XHR calls, so they don't need CORS.
 	AllowedOrigins []string
+
+	// AdminAPI is the chi.Router (or any http.Handler) that owns
+	// /admin/api/*. Mounted with the same CORS middleware as the OIDC
+	// surface; auth + scope gating live inside AdminAPI itself. Nil-safe:
+	// no AdminAPI → admin route tree absent.
+	AdminAPI http.Handler
 }
 
 // requestTimeout bounds per-request work end-to-end. The IdP has no
@@ -200,6 +206,18 @@ func New(cfg RouterConfig) http.Handler {
 		}
 		r.Get("/userinfo", userinfoHandler)
 		r.Options("/userinfo", userinfoHandler)
+	}
+
+	// Stretch: admin JSON API. Mounted under /admin/api/*. CORS at the
+	// edge; auth + scope gating live inside the AdminAPI handler itself
+	// (see internal/http/admin). Caller is responsible for wrapping it
+	// in admin.Authenticate before passing it in.
+	if cfg.AdminAPI != nil {
+		adminHandler := cfg.AdminAPI
+		if corsMW != nil {
+			adminHandler = corsMW(cfg.AdminAPI)
+		}
+		r.Mount("/admin/api", adminHandler)
 	}
 
 	return r

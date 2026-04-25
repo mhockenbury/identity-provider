@@ -169,7 +169,26 @@ func ConsentPOST(cfg ConsentConfig) http.HandlerFunc {
 
 		switch decision {
 		case "approve":
-			if err := cfg.Consent.Grant(r.Context(), sess.UserID, clientID, scopes); err != nil {
+			// Gate the `admin` scope: only is_admin users can grant it.
+			// We silently filter rather than erroring — non-admins simply
+			// don't get the scope, which the admin API will then reject
+			// at request time. Cleaner UX than a "you can't have admin"
+			// error page on the consent screen.
+			grantScopes := scopes
+			if containsExact(scopes, "admin") {
+				u, err := cfg.Users.GetByID(r.Context(), sess.UserID)
+				if err != nil {
+					slog.ErrorContext(r.Context(), "consent: get user for admin gate", "err", err)
+					http.Error(w, "internal error", http.StatusInternalServerError)
+					return
+				}
+				if !u.IsAdmin {
+					grantScopes = filterScope(scopes, "admin")
+					slog.InfoContext(r.Context(), "consent: dropped admin scope (user not admin)",
+						"user_id", sess.UserID, "client_id", clientID)
+				}
+			}
+			if err := cfg.Consent.Grant(r.Context(), sess.UserID, clientID, grantScopes); err != nil {
 				slog.ErrorContext(r.Context(), "consent grant", "err", err)
 				http.Error(w, "internal error", http.StatusInternalServerError)
 				return
@@ -229,4 +248,16 @@ func containsExact(s []string, v string) bool {
 		}
 	}
 	return false
+}
+
+// filterScope returns a new slice with all occurrences of v removed.
+// Used by the admin-scope gate at consent time.
+func filterScope(s []string, v string) []string {
+	out := make([]string, 0, len(s))
+	for _, x := range s {
+		if x != v {
+			out = append(out, x)
+		}
+	}
+	return out
 }
