@@ -261,6 +261,18 @@ func handleRefresh(w http.ResponseWriter, r *http.Request, cfg TokenConfig, clie
 		return
 	}
 
+	// Reuse grace: if this exact refresh-token plaintext was presented
+	// successfully within the last graceWindow, return the cached
+	// response. Handles the canonical race where a browser SPA fires
+	// two parallel renewals with the same token (e.g. React StrictMode
+	// double-mount in dev, or a tab refocus during proactive renewal).
+	// Without this, the second presentation gets invalid_grant even
+	// though the first one rotated correctly.
+	if cached := graceCache.Get(refreshToken); cached != nil {
+		writeTokenResponseRaw(w, cached)
+		return
+	}
+
 	// Optional scope downgrade request.
 	var requestedScopes []string
 	if raw := r.PostFormValue("scope"); raw != "" {
@@ -327,7 +339,10 @@ func handleRefresh(w http.ResponseWriter, r *http.Request, cfg TokenConfig, clie
 		idToken = tok
 	}
 
-	writeTokenResponse(w, tokenResponse{
+	// Marshal once so we can both cache and write the same bytes. The
+	// cache lookup at the top of this function consults the same body
+	// for any reuse-within-grace-window calls.
+	body, err := json.Marshal(tokenResponse{
 		AccessToken:  accessToken,
 		TokenType:    "Bearer",
 		ExpiresIn:    int64(cfg.AccessTokenTTL.Seconds()),
@@ -335,6 +350,13 @@ func handleRefresh(w http.ResponseWriter, r *http.Request, cfg TokenConfig, clie
 		RefreshToken: newPlaintext,
 		IDToken:      idToken,
 	})
+	if err != nil {
+		slog.ErrorContext(r.Context(), "token: marshal refresh response", "err", err)
+		writeOAuthError(w, http.StatusInternalServerError, "server_error", "")
+		return
+	}
+	graceCache.Put(refreshToken, body)
+	writeTokenResponseRaw(w, body)
 }
 
 // verifyPKCE: base64url(SHA-256(verifier)) == stored challenge.
@@ -361,6 +383,20 @@ func writeTokenResponse(w http.ResponseWriter, resp tokenResponse) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// writeTokenResponseRaw writes a pre-marshaled JSON body verbatim. Used
+// when serving a cached response from the refresh-grace cache so the
+// SPA gets bytewise-identical output (same access_token, same
+// refresh_token) on a duplicate refresh-token presentation.
+func writeTokenResponseRaw(w http.ResponseWriter, body []byte) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(body)
+	// json.NewEncoder.Encode adds a trailing newline; keep consistent.
+	if len(body) > 0 && body[len(body)-1] != '\n' {
+		_, _ = w.Write([]byte{'\n'})
+	}
 }
 
 func writeOAuthError(w http.ResponseWriter, status int, code, desc string) {
