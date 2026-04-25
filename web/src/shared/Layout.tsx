@@ -3,9 +3,11 @@
 
 import { Link, Outlet } from "react-router-dom";
 import { useAuth } from "react-oidc-context";
+import { useHasScope } from "../auth/useHasScope";
 
 export function Layout() {
   const auth = useAuth();
+  const isAdmin = useHasScope("admin");
   const email = auth.user?.profile.email ?? auth.user?.profile.sub ?? "";
 
   return (
@@ -16,12 +18,14 @@ export function Layout() {
             <Link to="/docs" className="font-semibold">
               docs
             </Link>
-            <Link
-              to="/admin"
-              className="text-sm text-gray-600 hover:text-gray-900"
-            >
-              admin
-            </Link>
+            {isAdmin && (
+              <Link
+                to="/admin"
+                className="text-sm text-gray-600 hover:text-gray-900"
+              >
+                admin
+              </Link>
+            )}
           </div>
           <div className="flex items-center gap-4 text-sm">
             <span className="text-gray-600">{email}</span>

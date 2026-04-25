@@ -12,10 +12,11 @@ import type { UserManagerSettings } from "oidc-client-ts";
 const IDP_URL = import.meta.env.VITE_IDP_URL ?? "http://localhost:8080";
 const CLIENT_ID = import.meta.env.VITE_CLIENT_ID ?? "localdev";
 
-// Base scopes for the docs SPA. The admin UI requests `admin` in
-// addition — done when the admin route tree mounts (see App.tsx).
-export const DOCS_SCOPES = "openid email read:docs write:docs";
-export const ADMIN_SCOPES = DOCS_SCOPES + " admin";
+// Scopes requested at sign-in. Always includes `admin` because
+// the IdP's consent flow silently drops it for non-admin users —
+// the SPA can then check the resulting token's scope claim to
+// decide whether to show admin UI.
+export const SCOPES = "openid email read:docs write:docs admin";
 
 export const oidcConfig: UserManagerSettings = {
   authority: IDP_URL,
@@ -23,7 +24,7 @@ export const oidcConfig: UserManagerSettings = {
   redirect_uri: window.location.origin + "/callback",
   post_logout_redirect_uri: window.location.origin + "/",
   response_type: "code",
-  scope: DOCS_SCOPES,
+  scope: SCOPES,
 
   // Token storage: in-memory only. `userStore` stays null so
   // oidc-client-ts never touches localStorage/sessionStorage for the

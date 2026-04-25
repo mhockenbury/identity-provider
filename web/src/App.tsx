@@ -14,11 +14,15 @@ import { RequireAuth } from "./auth/RequireAuth";
 import { Layout } from "./shared/Layout";
 import { Landing } from "./pages/Landing";
 import { Callback } from "./pages/Callback";
-import { AdminHome } from "./pages/AdminHome";
 import { DocsLayout } from "./docs/DocsLayout";
 import { DocsIndex } from "./docs/DocsIndex";
 import { DocDetail } from "./docs/DocDetail";
 import { FolderView } from "./docs/FolderView";
+import { AdminLayout } from "./admin/AdminLayout";
+import { Dashboard } from "./admin/Dashboard";
+import { UsersAdmin } from "./admin/UsersAdmin";
+import { GroupsAdmin } from "./admin/GroupsAdmin";
+import { OutboxAdmin } from "./admin/OutboxAdmin";
 
 // Single QueryClient for the app. Defaults are fine for now; we'll
 // tune staleTime per query where it matters.
@@ -51,7 +55,12 @@ function App() {
                 <Route path=":id" element={<DocDetail />} />
                 <Route path="folders/:id" element={<FolderView />} />
               </Route>
-              <Route path="/admin" element={<AdminHome />} />
+              <Route path="/admin" element={<AdminLayout />}>
+                <Route index element={<Dashboard />} />
+                <Route path="users" element={<UsersAdmin />} />
+                <Route path="groups" element={<GroupsAdmin />} />
+                <Route path="outbox" element={<OutboxAdmin />} />
+              </Route>
             </Route>
           </Routes>
         </BrowserRouter>
