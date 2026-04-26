@@ -35,6 +35,11 @@ type Deps struct {
 // so the API isn't fooled by an OUTBOX_MAX_ATTEMPTS misconfig.
 const MaxAttempts = 5
 
+// isoFormat is the JSON-friendly ISO 8601 timestamp the admin API
+// returns. UTC, second precision, no fractional seconds — matches
+// what most JS clients (incl. our SPA) expect from a Date string.
+const isoFormat = "2006-01-02T15:04:05Z"
+
 // Handler returns a chi.Router that mounts at /admin/api. Caller wraps
 // it in the auth middleware (Authenticate) and CORS.
 func Handler(d Deps) http.Handler {
@@ -79,7 +84,7 @@ func toUserView(u users.User) userView {
 		ID:        u.ID.String(),
 		Email:     u.Email,
 		IsAdmin:   u.IsAdmin,
-		CreatedAt: u.CreatedAt.UTC().Format("2006-01-02T15:04:05Z"),
+		CreatedAt: u.CreatedAt.UTC().Format(isoFormat),
 	}
 }
 
@@ -415,9 +420,9 @@ func listOutbox(d Deps) http.HandlerFunc {
 				writeError(w, http.StatusInternalServerError, "server_error", err.Error())
 				return
 			}
-			v.CreatedAt = createdAt.UTC().Format("2006-01-02T15:04:05Z")
+			v.CreatedAt = createdAt.UTC().Format(isoFormat)
 			if processedAt != nil {
-				s := processedAt.UTC().Format("2006-01-02T15:04:05Z")
+				s := processedAt.UTC().Format(isoFormat)
 				v.ProcessedAt = &s
 			}
 			v.Payload = string(payload)
@@ -543,7 +548,7 @@ func toClientView(c clients.Client) clientView {
 		RedirectURIs:  c.RedirectURIs,
 		AllowedGrants: c.AllowedGrants,
 		AllowedScopes: c.AllowedScopes,
-		CreatedAt:     c.CreatedAt.UTC().Format("2006-01-02T15:04:05Z"),
+		CreatedAt:     c.CreatedAt.UTC().Format(isoFormat),
 	}
 }
 

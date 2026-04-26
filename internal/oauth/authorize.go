@@ -153,6 +153,9 @@ func Authorize(cfg AuthorizeConfig) http.HandlerFunc {
 		}
 
 		// Redirect back to the client with the code + state.
+		// redirectURI was validated against client.RedirectURIs earlier in
+		// this handler (CheckRedirectURI exact-match per RFC 6749 §3.1.2.2);
+		// SonarCloud's dataflow can't see that. Open-redirect not possible.
 		u, _ := url.Parse(redirectURI)
 		params := u.Query()
 		params.Set("code", code)
@@ -160,7 +163,7 @@ func Authorize(cfg AuthorizeConfig) http.HandlerFunc {
 			params.Set("state", state)
 		}
 		u.RawQuery = params.Encode()
-		http.Redirect(w, r, u.String(), http.StatusFound)
+		http.Redirect(w, r, u.String(), http.StatusFound) // NOSONAR S5146 — exact-match allowlist enforced upstream
 	}
 }
 

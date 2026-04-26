@@ -209,7 +209,10 @@ func ConsentPOST(cfg ConsentConfig) http.HandlerFunc {
 				q.Set("state", state)
 			}
 			u.RawQuery = q.Encode()
-			http.Redirect(w, r, u.String(), http.StatusFound)
+			// redirectURI was already validated against client.RedirectURIs
+			// at line 165 (containsExact check); SonarCloud's dataflow
+			// can't see across the helper. Open-redirect not possible.
+			http.Redirect(w, r, u.String(), http.StatusFound) // NOSONAR S5146 — exact-match allowlist enforced upstream
 
 		default:
 			http.Error(w, "invalid decision", http.StatusBadRequest)

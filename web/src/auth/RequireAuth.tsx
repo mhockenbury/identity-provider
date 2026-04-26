@@ -8,7 +8,7 @@
 import { useAuth } from "react-oidc-context";
 import type { ReactNode } from "react";
 
-export function RequireAuth({ children }: { children: ReactNode }) {
+export function RequireAuth({ children }: Readonly<{children: ReactNode}>) {
   const auth = useAuth();
 
   if (auth.activeNavigator === "signinSilent" || auth.isLoading) {
@@ -39,7 +39,7 @@ export function RequireAuth({ children }: { children: ReactNode }) {
   return <>{children}</>;
 }
 
-function CenteredMessage({ children }: { children: ReactNode }) {
+function CenteredMessage({ children }: Readonly<{children: ReactNode}>) {
   return (
     <div className="flex h-full items-center justify-center">
       <div className="text-center text-gray-600">{children}</div>

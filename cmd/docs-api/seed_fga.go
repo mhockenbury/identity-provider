@@ -77,28 +77,28 @@ func SeedFGA(ctx context.Context, c *client.OpenFgaClient, p SeedPeople) error {
 	// Parent tuples (folders + docs need their parent linked for
 	// inheritance to resolve). Always safe to write; idempotent.
 	writes = append(writes,
-		parentTuple("folder:"+SeedIDs.FolderRunbooks, "folder:"+SeedIDs.FolderEngineering),
-		parentTuple("document:"+SeedIDs.DocEngOverview, "folder:"+SeedIDs.FolderEngineering),
-		parentTuple("document:"+SeedIDs.DocDeployRunbook, "folder:"+SeedIDs.FolderRunbooks),
-		parentTuple("document:"+SeedIDs.DocOnCallRunbook, "folder:"+SeedIDs.FolderRunbooks),
-		parentTuple("document:"+SeedIDs.DocPublicReadme, "folder:"+SeedIDs.FolderPublic),
+		parentTuple(fga.TypeFolder+SeedIDs.FolderRunbooks, fga.TypeFolder+SeedIDs.FolderEngineering),
+		parentTuple(fga.TypeDocument+SeedIDs.DocEngOverview, fga.TypeFolder+SeedIDs.FolderEngineering),
+		parentTuple(fga.TypeDocument+SeedIDs.DocDeployRunbook, fga.TypeFolder+SeedIDs.FolderRunbooks),
+		parentTuple(fga.TypeDocument+SeedIDs.DocOnCallRunbook, fga.TypeFolder+SeedIDs.FolderRunbooks),
+		parentTuple(fga.TypeDocument+SeedIDs.DocPublicReadme, fga.TypeFolder+SeedIDs.FolderPublic),
 	)
 
 	if p.Alice != "" {
 		writes = append(writes,
-			ownerTuple("user:"+p.Alice, "folder:"+SeedIDs.FolderEngineering),
-			editorTuple("user:"+p.Alice, "folder:"+SeedIDs.FolderRunbooks),
-			ownerTuple("user:"+p.Alice, "document:"+SeedIDs.DocPrivateNotes),
+			ownerTuple(fga.TypeUser+p.Alice, fga.TypeFolder+SeedIDs.FolderEngineering),
+			editorTuple(fga.TypeUser+p.Alice, fga.TypeFolder+SeedIDs.FolderRunbooks),
+			ownerTuple(fga.TypeUser+p.Alice, fga.TypeDocument+SeedIDs.DocPrivateNotes),
 		)
 	}
 	if p.Bob != "" {
 		writes = append(writes,
-			viewerTuple("user:"+p.Bob, "folder:"+SeedIDs.FolderEngineering),
+			viewerTuple(fga.TypeUser+p.Bob, fga.TypeFolder+SeedIDs.FolderEngineering),
 		)
 	}
 	if p.Carol != "" {
 		writes = append(writes,
-			viewerTuple("user:"+p.Carol, "folder:"+SeedIDs.FolderPublic),
+			viewerTuple(fga.TypeUser+p.Carol, fga.TypeFolder+SeedIDs.FolderPublic),
 		)
 	}
 
@@ -118,17 +118,17 @@ func SeedFGA(ctx context.Context, c *client.OpenFgaClient, p SeedPeople) error {
 // Thin helpers; keep the Write call sites readable.
 
 func parentTuple(child, parent string) client.ClientTupleKey {
-	return client.ClientTupleKey{User: parent, Relation: "parent", Object: child}
+	return client.ClientTupleKey{User: parent, Relation: fga.RelParent, Object: child}
 }
 
 func ownerTuple(user, obj string) client.ClientTupleKey {
-	return client.ClientTupleKey{User: user, Relation: "owner", Object: obj}
+	return client.ClientTupleKey{User: user, Relation: fga.RelOwner, Object: obj}
 }
 
 func editorTuple(user, obj string) client.ClientTupleKey {
-	return client.ClientTupleKey{User: user, Relation: "editor", Object: obj}
+	return client.ClientTupleKey{User: user, Relation: fga.RelEditor, Object: obj}
 }
 
 func viewerTuple(user, obj string) client.ClientTupleKey {
-	return client.ClientTupleKey{User: user, Relation: "viewer", Object: obj}
+	return client.ClientTupleKey{User: user, Relation: fga.RelViewer, Object: obj}
 }

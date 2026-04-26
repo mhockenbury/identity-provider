@@ -55,12 +55,18 @@ type folderResponse struct {
 	Permission string `json:"permission"`
 }
 
+// permissionTiers is the order resolvePermission walks. Highest tier
+// first so owner short-circuits on a single FGA Check.
+var permissionTiers = []string{fga.RelOwner, fga.RelEditor, fga.RelViewer}
+
 // resolvePermission returns the highest tier the user has on an object,
 // or "" if none. Short-circuits on the first positive check — so a user
 // who's owner only pays 1 FGA Check round-trip, not 3.
+//
+// objectType MUST include the trailing colon (use the fga.Type* constants).
 func (h handlerDeps) resolvePermission(r *http.Request, user, objectType, objectID string) (string, error) {
-	obj := objectType + ":" + objectID
-	for _, rel := range []string{"owner", "editor", "viewer"} {
+	obj := objectType + objectID
+	for _, rel := range permissionTiers {
 		ok, err := h.fga.Check(r.Context(), user, rel, obj)
 		if err != nil {
 			return "", err
@@ -72,20 +78,27 @@ func (h handlerDeps) resolvePermission(r *http.Request, user, objectType, object
 	return "", nil
 }
 
+// OAuth scopes this API enforces. Match the IdP's discovery doc and
+// the localdev client's allowed_scopes seed.
+const (
+	scopeRead  = "read:docs"
+	scopeWrite = "write:docs"
+)
+
 // registerResourceRoutes mounts the doc + folder handlers. Called from
 // newRouter inside the authenticated group.
 func registerResourceRoutes(r chi.Router, h handlerDeps) {
-	// Reads — require read:docs.
-	r.With(requireScope("read:docs")).Get("/docs", h.listDocs)
-	r.With(requireScope("read:docs")).Get("/docs/{id}", h.getDoc)
-	r.With(requireScope("read:docs")).Get("/folders", h.listFolders)
-	r.With(requireScope("read:docs")).Get("/folders/{id}", h.getFolder)
-	r.With(requireScope("read:docs")).Get("/folders/{id}/docs", h.listFolderDocs)
+	// Reads.
+	r.With(requireScope(scopeRead)).Get("/docs", h.listDocs)
+	r.With(requireScope(scopeRead)).Get("/docs/{id}", h.getDoc)
+	r.With(requireScope(scopeRead)).Get("/folders", h.listFolders)
+	r.With(requireScope(scopeRead)).Get("/folders/{id}", h.getFolder)
+	r.With(requireScope(scopeRead)).Get("/folders/{id}/docs", h.listFolderDocs)
 
-	// Writes — require write:docs.
-	r.With(requireScope("write:docs")).Post("/docs", h.createDoc)
-	r.With(requireScope("write:docs")).Patch("/docs/{id}", h.updateDoc)
-	r.With(requireScope("write:docs")).Delete("/docs/{id}", h.deleteDoc)
+	// Writes.
+	r.With(requireScope(scopeWrite)).Post("/docs", h.createDoc)
+	r.With(requireScope(scopeWrite)).Patch("/docs/{id}", h.updateDoc)
+	r.With(requireScope(scopeWrite)).Delete("/docs/{id}", h.deleteDoc)
 }
 
 // --- handlers ---
@@ -99,7 +112,7 @@ func (h handlerDeps) listDocs(w http.ResponseWriter, r *http.Request) {
 	all := h.store.ListDocs()
 	visible := make([]docResponse, 0, len(all))
 	for _, d := range all {
-		perm, err := h.resolvePermission(r, user, "document", d.ID)
+		perm, err := h.resolvePermission(r, user, fga.TypeDocument,d.ID)
 		if err != nil {
 			writeError(w, http.StatusBadGateway, "authz_backend", err.Error())
 			return
@@ -123,7 +136,7 @@ func (h handlerDeps) getDoc(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	user := userFromClaims(claimsFromCtx(r.Context()))
-	perm, err := h.resolvePermission(r, user, "document", id)
+	perm, err := h.resolvePermission(r, user, fga.TypeDocument,id)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "authz_backend", err.Error())
 		return
@@ -143,7 +156,7 @@ func (h handlerDeps) listFolders(w http.ResponseWriter, r *http.Request) {
 	all := h.store.ListFolders()
 	visible := make([]folderResponse, 0, len(all))
 	for _, f := range all {
-		perm, err := h.resolvePermission(r, user, "folder", f.ID)
+		perm, err := h.resolvePermission(r, user, fga.TypeFolder,f.ID)
 		if err != nil {
 			writeError(w, http.StatusBadGateway, "authz_backend", err.Error())
 			return
@@ -165,7 +178,7 @@ func (h handlerDeps) getFolder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	user := userFromClaims(claimsFromCtx(r.Context()))
-	perm, err := h.resolvePermission(r, user, "folder", id)
+	perm, err := h.resolvePermission(r, user, fga.TypeFolder,id)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "authz_backend", err.Error())
 		return
@@ -189,7 +202,7 @@ func (h handlerDeps) listFolderDocs(w http.ResponseWriter, r *http.Request) {
 	}
 	user := userFromClaims(claimsFromCtx(r.Context()))
 
-	folderPerm, err := h.resolvePermission(r, user, "folder", folderID)
+	folderPerm, err := h.resolvePermission(r, user, fga.TypeFolder,folderID)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "authz_backend", err.Error())
 		return
@@ -202,7 +215,7 @@ func (h handlerDeps) listFolderDocs(w http.ResponseWriter, r *http.Request) {
 	docs := h.store.ListFolderDocs(folderID)
 	visible := make([]docResponse, 0, len(docs))
 	for _, d := range docs {
-		perm, err := h.resolvePermission(r, user, "document", d.ID)
+		perm, err := h.resolvePermission(r, user, fga.TypeDocument,d.ID)
 		if err != nil {
 			writeError(w, http.StatusBadGateway, "authz_backend", err.Error())
 			return
@@ -244,7 +257,7 @@ func (h handlerDeps) createDoc(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "bad_request", "folder not found")
 			return
 		}
-		allowed, err := h.fga.Check(r.Context(), user, "viewer", "folder:"+req.FolderID)
+		allowed, err := h.fga.Check(r.Context(), user, fga.RelViewer, fga.TypeFolder+req.FolderID)
 		if err != nil {
 			writeError(w, http.StatusBadGateway, "authz_backend", err.Error())
 			return
@@ -260,11 +273,11 @@ func (h handlerDeps) createDoc(w http.ResponseWriter, r *http.Request) {
 	doc := h.store.CreateDocument(req.FolderID, req.Title, req.Body, sub)
 
 	tuples := []openfgaclient.ClientTupleKey{
-		{User: user, Relation: "owner", Object: "document:" + doc.ID},
+		{User: user, Relation: fga.RelOwner, Object: fga.TypeDocument + doc.ID},
 	}
 	if req.FolderID != "" {
 		tuples = append(tuples, openfgaclient.ClientTupleKey{
-			User: "folder:" + req.FolderID, Relation: "parent", Object: "document:" + doc.ID,
+			User: fga.TypeFolder + req.FolderID, Relation: fga.RelParent, Object: fga.TypeDocument + doc.ID,
 		})
 	}
 	if err := fga.WriteAndDelete(r.Context(), h.fgaRawClient, tuples, nil, true); err != nil {
@@ -285,7 +298,7 @@ func (h handlerDeps) updateDoc(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	user := userFromClaims(claimsFromCtx(r.Context()))
-	allowed, err := h.fga.Check(r.Context(), user, "editor", "document:"+id)
+	allowed, err := h.fga.Check(r.Context(), user, fga.RelEditor, fga.TypeDocument+id)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "authz_backend", err.Error())
 		return
@@ -323,7 +336,7 @@ func (h handlerDeps) deleteDoc(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	user := userFromClaims(claimsFromCtx(r.Context()))
-	allowed, err := h.fga.Check(r.Context(), user, "owner", "document:"+id)
+	allowed, err := h.fga.Check(r.Context(), user, fga.RelOwner, fga.TypeDocument+id)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "authz_backend", err.Error())
 		return
@@ -340,7 +353,7 @@ func (h handlerDeps) deleteDoc(w http.ResponseWriter, r *http.Request) {
 	// Best-effort tuple cleanup. OnMissingDeletes=ignore absorbs the
 	// "nothing to delete" case if something's already diverged.
 	deletes := []openfgaclient.ClientTupleKeyWithoutCondition{
-		{User: user, Relation: "owner", Object: "document:" + id},
+		{User: user, Relation: fga.RelOwner, Object: fga.TypeDocument + id},
 	}
 	if err := fga.WriteAndDelete(r.Context(), h.fgaRawClient, nil, deletes, true); err != nil {
 		// Doc is already deleted from the store; log but don't fail.
@@ -360,7 +373,7 @@ func userFromClaims(c *tokens.AccessClaims) string {
 	if c == nil {
 		return ""
 	}
-	return "user:" + c.Subject
+	return fga.TypeUser + c.Subject
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {

@@ -29,7 +29,7 @@ export function Callback() {
   return <Message>Waiting for auth…</Message>;
 }
 
-function Message({ children }: { children: React.ReactNode }) {
+function Message({ children }: Readonly<{children: React.ReactNode}>) {
   return (
     <div className="flex min-h-full items-center justify-center text-gray-600">
       <div className="text-center">{children}</div>

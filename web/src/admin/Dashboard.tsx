@@ -61,13 +61,11 @@ function Tile({
   count,
   loading,
   danger,
-}: {
-  to: string;
+}: Readonly<{to: string;
   label: string;
   count?: number;
   loading?: boolean;
-  danger?: boolean;
-}) {
+  danger?: boolean;}>) {
   return (
     <Link
       to={to}

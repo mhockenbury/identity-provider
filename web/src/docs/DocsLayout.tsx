@@ -83,7 +83,7 @@ export function DocsLayout() {
 // FolderTree renders folders as a flat list grouped by parent. Two
 // levels is the maximum our seed corpus has, so we don't over-engineer
 // with a recursive tree library.
-function FolderTree({ folders }: { folders: Folder[] }) {
+function FolderTree({ folders }: Readonly<{folders: Folder[]}>) {
   const topLevel = folders.filter((f) => !f.parent_id);
   const children = (parentID: string) =>
     folders.filter((f) => f.parent_id === parentID);
@@ -112,7 +112,7 @@ function FolderTree({ folders }: { folders: Folder[] }) {
   );
 }
 
-function FolderLink({ folder }: { folder: Folder }) {
+function FolderLink({ folder }: Readonly<{folder: Folder}>) {
   return (
     <NavLink
       to={`/docs/folders/${folder.id}`}
@@ -133,7 +133,7 @@ function FolderLink({ folder }: { folder: Folder }) {
 // OrphanDocs shows docs without a folder_id. These only appear in the
 // sidebar so the user can get to them — they're otherwise orphaned
 // from the folder navigation.
-function OrphanDocs({ docs }: { docs: Doc[] }) {
+function OrphanDocs({ docs }: Readonly<{docs: Doc[]}>) {
   const orphans = docs.filter((d) => !d.folder_id);
   if (orphans.length === 0) {
     return <p className="px-2 text-sm text-gray-500">None.</p>;

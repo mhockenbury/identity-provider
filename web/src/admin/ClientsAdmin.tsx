@@ -149,10 +149,10 @@ function Empty() {
 function SecretBanner({
   banner,
   onDismiss,
-}: {
+}: Readonly<{
   banner: { clientID: string; plaintext: string; context: "created" | "rotated" };
   onDismiss: () => void;
-}) {
+}>) {
   const [copied, setCopied] = useState(false);
   if (!banner.plaintext) return null; // public clients
   const action =
@@ -201,10 +201,8 @@ function SecretBanner({
 function CreateClientForm({
   onCreated,
   onCancel,
-}: {
-  onCreated: (c: AdminClientCreated) => void;
-  onCancel: () => void;
-}) {
+}: Readonly<{onCreated: (c: AdminClientCreated) => void;
+  onCancel: () => void;}>) {
   const fetch = useAuthedFetch();
   const queryClient = useQueryClient();
   const [id, setID] = useState("");
@@ -320,12 +318,10 @@ function ClientDetail({
   onChanged,
   onSecretRevealed,
   onDeleted,
-}: {
-  client: AdminClient;
+}: Readonly<{client: AdminClient;
   onChanged: (c: AdminClient) => void;
   onSecretRevealed: (plaintext: string) => void;
-  onDeleted: () => void;
-}) {
+  onDeleted: () => void;}>) {
   const fetch = useAuthedFetch();
   const queryClient = useQueryClient();
   const [editing, setEditing] = useState(false);
@@ -514,11 +510,9 @@ function Field({
   label,
   hint,
   children,
-}: {
-  label: string;
+}: Readonly<{label: string;
   hint?: string;
-  children: React.ReactNode;
-}) {
+  children: React.ReactNode;}>) {
   return (
     <div>
       <label className="block text-sm font-medium text-gray-900">{label}</label>
@@ -531,10 +525,8 @@ function Field({
 function Detail({
   label,
   children,
-}: {
-  label: string;
-  children: React.ReactNode;
-}) {
+}: Readonly<{label: string;
+  children: React.ReactNode;}>) {
   return (
     <div>
       <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">

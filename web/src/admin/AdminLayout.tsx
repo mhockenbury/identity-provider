@@ -25,7 +25,7 @@ export function AdminLayout() {
 
   const tab = "rounded px-3 py-1.5 text-sm hover:bg-gray-100";
   const tabActive = "bg-blue-100 font-medium text-blue-900";
-  const linkClass = ({ isActive }: { isActive: boolean }) =>
+  const linkClass = ({ isActive }: Readonly<{isActive: boolean}>) =>
     `${tab} ${isActive ? tabActive : "text-gray-700"}`;
 
   return (

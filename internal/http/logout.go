@@ -53,9 +53,12 @@ func Logout(cfg LogoutConfig) http.HandlerFunc {
 		}
 		ClearSessionCookie(w, cfg.Secure)
 
-		// Accept params from GET query or POST form.
+		// Accept params from GET query or POST form. resolvePostLogoutRedirect
+		// validates any user-supplied URI against the client's registered
+		// redirect_uris and falls back to "/" on any mismatch — SonarCloud's
+		// dataflow can't see through the helper. Open-redirect not possible.
 		redirectTo := resolvePostLogoutRedirect(r, cfg.Clients)
-		http.Redirect(w, r, redirectTo, http.StatusFound)
+		http.Redirect(w, r, redirectTo, http.StatusFound) // NOSONAR S5146 — exact-match allowlist enforced in resolvePostLogoutRedirect
 	}
 }
 

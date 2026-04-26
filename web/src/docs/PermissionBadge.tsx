@@ -9,7 +9,7 @@ const styles: Record<Permission, string> = {
   viewer: "bg-gray-100 text-gray-700 ring-gray-200",
 };
 
-export function PermissionBadge({ permission }: { permission: Permission }) {
+export function PermissionBadge({ permission }: Readonly<{permission: Permission}>) {
   return (
     <span
       className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ring-1 ring-inset ${styles[permission]}`}

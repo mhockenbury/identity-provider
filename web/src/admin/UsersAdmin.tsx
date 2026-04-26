@@ -53,7 +53,7 @@ export function UsersAdmin() {
   );
 }
 
-function UserRow({ user, isMe }: { user: AdminUser; isMe: boolean }) {
+function UserRow({ user, isMe }: Readonly<{user: AdminUser; isMe: boolean}>) {
   const fetch = useAuthedFetch();
   const queryClient = useQueryClient();
   const toggle = useMutation({
@@ -180,7 +180,7 @@ function CreateUserForm() {
   );
 }
 
-function Th({ children }: { children: React.ReactNode }) {
+function Th({ children }: Readonly<{children: React.ReactNode}>) {
   return (
     <th className="px-4 py-2 text-xs font-semibold uppercase tracking-wide text-gray-600">
       {children}
@@ -190,9 +190,7 @@ function Th({ children }: { children: React.ReactNode }) {
 function Td({
   children,
   className = "",
-}: {
-  children: React.ReactNode;
-  className?: string;
-}) {
+}: Readonly<{children: React.ReactNode;
+  className?: string;}>) {
   return <td className={`px-4 py-2 ${className}`}>{children}</td>;
 }

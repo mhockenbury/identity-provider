@@ -133,7 +133,7 @@ function CreateGroupForm() {
   );
 }
 
-function GroupMembers({ group }: { group: AdminGroup }) {
+function GroupMembers({ group }: Readonly<{group: AdminGroup}>) {
   const fetch = useAuthedFetch();
   const queryClient = useQueryClient();
   const [newUser, setNewUser] = useState("");

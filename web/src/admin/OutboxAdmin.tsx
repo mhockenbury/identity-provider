@@ -136,7 +136,7 @@ export function OutboxAdmin() {
   );
 }
 
-function StatusPill({ status }: { status: string }) {
+function StatusPill({ status }: Readonly<{status: string}>) {
   const styles =
     status === "processed"
       ? "bg-gray-100 text-gray-700"
@@ -157,12 +157,12 @@ function Actions({
   onRetry,
   onPurge,
   disabled,
-}: {
+}: Readonly<{
   row: { id: number; status: string };
   onRetry: () => void;
   onPurge: (force: boolean) => void;
   disabled: boolean;
-}) {
+}>) {
   const [confirming, setConfirming] = useState<"retry" | "purge" | null>(null);
   // Pending rows shouldn't be purged without --force; failed rows can.
   const purgeNeedsForce = row.status === "pending";
@@ -218,7 +218,7 @@ function Actions({
 function truncate(s: string, n: number): string {
   return s.length > n ? s.slice(0, n - 1) + "…" : s;
 }
-function Th({ children }: { children: React.ReactNode }) {
+function Th({ children }: Readonly<{children: React.ReactNode}>) {
   return (
     <th className="px-4 py-2 text-xs font-semibold uppercase tracking-wide text-gray-600">
       {children}
@@ -228,9 +228,7 @@ function Th({ children }: { children: React.ReactNode }) {
 function Td({
   children,
   className = "",
-}: {
-  children: React.ReactNode;
-  className?: string;
-}) {
+}: Readonly<{children: React.ReactNode;
+  className?: string;}>) {
   return <td className={`px-4 py-2 align-top ${className}`}>{children}</td>;
 }

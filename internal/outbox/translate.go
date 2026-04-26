@@ -5,6 +5,8 @@ import (
 
 	openfga "github.com/openfga/go-sdk"
 	"github.com/openfga/go-sdk/client"
+
+	"github.com/mhockenbury/identity-provider/internal/fga"
 )
 
 // TupleOpKind distinguishes FGA operations the worker batches into a
@@ -59,9 +61,9 @@ func Translate(e Event) ([]TupleOp, error) {
 		return []TupleOp{{
 			Kind: TupleOpWrite,
 			Tuple: client.ClientTupleKey{
-				User:     fmt.Sprintf("user:%s", ev.UserID),
-				Relation: "member",
-				Object:   fmt.Sprintf("group:%s", ev.GroupID),
+				User:     fga.TypeUser + ev.UserID.String(),
+				Relation: fga.RelMember,
+				Object:   fga.TypeGroup + ev.GroupID.String(),
 			},
 		}}, nil
 
@@ -69,9 +71,9 @@ func Translate(e Event) ([]TupleOp, error) {
 		return []TupleOp{{
 			Kind: TupleOpDelete,
 			Tuple: client.ClientTupleKey{
-				User:     fmt.Sprintf("user:%s", ev.UserID),
-				Relation: "member",
-				Object:   fmt.Sprintf("group:%s", ev.GroupID),
+				User:     fga.TypeUser + ev.UserID.String(),
+				Relation: fga.RelMember,
+				Object:   fga.TypeGroup + ev.GroupID.String(),
 			},
 		}}, nil
 

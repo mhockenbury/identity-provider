@@ -182,13 +182,9 @@ func runOutbox(args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		return fmt.Errorf("DATABASE_URL not set")
-	}
-	pool, err := pgxpool.New(ctx, dsn)
+	pool, err := openPool(ctx)
 	if err != nil {
-		return fmt.Errorf("pgxpool.New: %w", err)
+		return err
 	}
 	defer pool.Close()
 
@@ -431,146 +427,137 @@ func runGroups(args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		return fmt.Errorf("DATABASE_URL not set")
-	}
-	pool, err := pgxpool.New(ctx, dsn)
+	pool, err := openPool(ctx)
 	if err != nil {
-		return fmt.Errorf("pgxpool.New: %w", err)
+		return err
 	}
 	defer pool.Close()
-	if err := pool.Ping(ctx); err != nil {
-		return fmt.Errorf("postgres ping: %w", err)
-	}
 
 	groups := users.NewGroupStore(pool)
 	userStore := users.NewPostgresStore(pool)
 
 	switch args[0] {
 	case "create":
-		if len(args) < 2 {
-			return usageErr("groups create: need <name>")
-		}
-		g, err := groups.Create(ctx, args[1])
-		if err != nil {
-			return fmt.Errorf("create: %w", err)
-		}
-		fmt.Printf("created group: id=%s name=%s\n", g.ID, g.Name)
-		return nil
-
+		return runGroupsCreate(ctx, groups, args[1:])
 	case "list":
-		all, err := groups.List(ctx)
-		if err != nil {
-			return fmt.Errorf("list: %w", err)
-		}
-		if len(all) == 0 {
-			fmt.Println("(no groups — run: idp groups create <name>)")
-			return nil
-		}
-		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(w, "ID\tNAME\tCREATED_AT")
-		for _, g := range all {
-			fmt.Fprintf(w, "%s\t%s\t%s\n", g.ID, g.Name, g.CreatedAt.Format(time.RFC3339))
-		}
-		return w.Flush()
-
+		return runGroupsList(ctx, groups)
 	case "add-member":
-		if len(args) < 3 {
-			return usageErr("groups add-member: need <group-name> <user-email>")
-		}
-		groupName, userEmail := args[1], args[2]
-
-		g, err := groups.GetByName(ctx, groupName)
-		if err != nil {
-			return fmt.Errorf("lookup group %q: %w", groupName, err)
-		}
-		u, err := userStore.GetByEmail(ctx, userEmail)
-		if err != nil {
-			return fmt.Errorf("lookup user %q: %w", userEmail, err)
-		}
-
-		// THE critical transaction: identity row + outbox row commit
-		// atomically. If either fails, neither is visible.
-		tx, err := pool.Begin(ctx)
-		if err != nil {
-			return fmt.Errorf("begin tx: %w", err)
-		}
-		defer tx.Rollback(ctx) // no-op after Commit
-
-		if err := groups.AddMemberTx(ctx, tx, u.ID, g.ID); err != nil {
-			return fmt.Errorf("add member: %w", err)
-		}
-		event := outbox.GroupMembershipAdded{UserID: u.ID, GroupID: g.ID}
-		if err := outbox.Enqueue(ctx, tx, event); err != nil {
-			return fmt.Errorf("enqueue outbox event: %w", err)
-		}
-		if err := tx.Commit(ctx); err != nil {
-			return fmt.Errorf("commit: %w", err)
-		}
-		fmt.Printf("added %s to %s (outbox event enqueued)\n", u.Email, g.Name)
-		return nil
-
+		return runGroupsMember(ctx, pool, groups, userStore, args[1:], true)
 	case "remove-member":
-		if len(args) < 3 {
-			return usageErr("groups remove-member: need <group-name> <user-email>")
-		}
-		groupName, userEmail := args[1], args[2]
-
-		g, err := groups.GetByName(ctx, groupName)
-		if err != nil {
-			return fmt.Errorf("lookup group %q: %w", groupName, err)
-		}
-		u, err := userStore.GetByEmail(ctx, userEmail)
-		if err != nil {
-			return fmt.Errorf("lookup user %q: %w", userEmail, err)
-		}
-
-		tx, err := pool.Begin(ctx)
-		if err != nil {
-			return fmt.Errorf("begin tx: %w", err)
-		}
-		defer tx.Rollback(ctx)
-
-		if err := groups.RemoveMemberTx(ctx, tx, u.ID, g.ID); err != nil {
-			return fmt.Errorf("remove member: %w", err)
-		}
-		event := outbox.GroupMembershipRemoved{UserID: u.ID, GroupID: g.ID}
-		if err := outbox.Enqueue(ctx, tx, event); err != nil {
-			return fmt.Errorf("enqueue outbox event: %w", err)
-		}
-		if err := tx.Commit(ctx); err != nil {
-			return fmt.Errorf("commit: %w", err)
-		}
-		fmt.Printf("removed %s from %s (outbox event enqueued)\n", u.Email, g.Name)
-		return nil
-
+		return runGroupsMember(ctx, pool, groups, userStore, args[1:], false)
 	case "list-members":
-		if len(args) < 2 {
-			return usageErr("groups list-members: need <group-name>")
-		}
-		g, err := groups.GetByName(ctx, args[1])
-		if err != nil {
-			return fmt.Errorf("lookup group: %w", err)
-		}
-		members, err := groups.ListMembers(ctx, g.ID)
-		if err != nil {
-			return fmt.Errorf("list members: %w", err)
-		}
-		if len(members) == 0 {
-			fmt.Printf("(group %q has no members)\n", g.Name)
-			return nil
-		}
-		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(w, "USER_ID\tEMAIL")
-		for _, m := range members {
-			fmt.Fprintf(w, "%s\t%s\n", m.ID, m.Email)
-		}
-		return w.Flush()
-
+		return runGroupsListMembers(ctx, groups, args[1:])
 	default:
 		return usageErr(fmt.Sprintf("groups: unknown subcommand %q", args[0]))
 	}
+}
+
+func runGroupsCreate(ctx context.Context, groups *users.GroupStore, args []string) error {
+	if len(args) < 1 {
+		return usageErr("groups create: need <name>")
+	}
+	g, err := groups.Create(ctx, args[0])
+	if err != nil {
+		return fmt.Errorf("create: %w", err)
+	}
+	fmt.Printf("created group: id=%s name=%s\n", g.ID, g.Name)
+	return nil
+}
+
+func runGroupsList(ctx context.Context, groups *users.GroupStore) error {
+	all, err := groups.List(ctx)
+	if err != nil {
+		return fmt.Errorf("list: %w", err)
+	}
+	if len(all) == 0 {
+		fmt.Println("(no groups — run: idp groups create <name>)")
+		return nil
+	}
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "ID\tNAME\tCREATED_AT")
+	for _, g := range all {
+		fmt.Fprintf(w, "%s\t%s\t%s\n", g.ID, g.Name, g.CreatedAt.Format(time.RFC3339))
+	}
+	return w.Flush()
+}
+
+// runGroupsMember handles add-member and remove-member — same shape with
+// different store call + outbox event type. THE critical transaction:
+// membership row + outbox row commit atomically. If either fails,
+// neither is visible.
+func runGroupsMember(ctx context.Context, pool *pgxpool.Pool, groups *users.GroupStore, userStore *users.PostgresStore, args []string, add bool) error {
+	verb := "add-member"
+	if !add {
+		verb = "remove-member"
+	}
+	if len(args) < 2 {
+		return usageErr(fmt.Sprintf("groups %s: need <group-name> <user-email>", verb))
+	}
+	groupName, userEmail := args[0], args[1]
+
+	g, err := groups.GetByName(ctx, groupName)
+	if err != nil {
+		return fmt.Errorf("lookup group %q: %w", groupName, err)
+	}
+	u, err := userStore.GetByEmail(ctx, userEmail)
+	if err != nil {
+		return fmt.Errorf("lookup user %q: %w", userEmail, err)
+	}
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx) // no-op after Commit
+
+	var event outbox.Event
+	if add {
+		if err := groups.AddMemberTx(ctx, tx, u.ID, g.ID); err != nil {
+			return fmt.Errorf("add member: %w", err)
+		}
+		event = outbox.GroupMembershipAdded{UserID: u.ID, GroupID: g.ID}
+	} else {
+		if err := groups.RemoveMemberTx(ctx, tx, u.ID, g.ID); err != nil {
+			return fmt.Errorf("remove member: %w", err)
+		}
+		event = outbox.GroupMembershipRemoved{UserID: u.ID, GroupID: g.ID}
+	}
+	if err := outbox.Enqueue(ctx, tx, event); err != nil {
+		return fmt.Errorf("enqueue outbox event: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit: %w", err)
+	}
+	if add {
+		fmt.Printf("added %s to %s (outbox event enqueued)\n", u.Email, g.Name)
+	} else {
+		fmt.Printf("removed %s from %s (outbox event enqueued)\n", u.Email, g.Name)
+	}
+	return nil
+}
+
+func runGroupsListMembers(ctx context.Context, groups *users.GroupStore, args []string) error {
+	if len(args) < 1 {
+		return usageErr("groups list-members: need <group-name>")
+	}
+	g, err := groups.GetByName(ctx, args[0])
+	if err != nil {
+		return fmt.Errorf("lookup group: %w", err)
+	}
+	members, err := groups.ListMembers(ctx, g.ID)
+	if err != nil {
+		return fmt.Errorf("list members: %w", err)
+	}
+	if len(members) == 0 {
+		fmt.Printf("(group %q has no members)\n", g.Name)
+		return nil
+	}
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "USER_ID\tEMAIL")
+	for _, m := range members {
+		fmt.Fprintf(w, "%s\t%s\n", m.ID, m.Email)
+	}
+	return w.Flush()
 }
 
 // runUsers dispatches the `idp users` subcommands. Users subcommands
@@ -583,91 +570,89 @@ func runUsers(args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		return fmt.Errorf("DATABASE_URL not set")
-	}
-	pool, err := pgxpool.New(ctx, dsn)
+	pool, err := openPool(ctx)
 	if err != nil {
-		return fmt.Errorf("pgxpool.New: %w", err)
+		return err
 	}
 	defer pool.Close()
-	if err := pool.Ping(ctx); err != nil {
-		return fmt.Errorf("postgres ping: %w", err)
-	}
 	store := users.NewPostgresStore(pool)
 
 	switch args[0] {
 	case "create":
-		if len(args) < 3 {
-			return usageErr("users create: need <email> <password>")
-		}
-		email, password := args[1], args[2]
-		u, err := store.Create(ctx, email, password)
-		if err != nil {
-			return fmt.Errorf("create: %w", err)
-		}
-		fmt.Printf("created user: id=%s email=%s\n", u.ID, u.Email)
-		return nil
-
+		return runUsersCreate(ctx, store, args[1:])
 	case "list":
-		all, err := store.List(ctx)
-		if err != nil {
-			return fmt.Errorf("list users: %w", err)
-		}
-		if len(all) == 0 {
-			fmt.Println("(no users — run: idp users create <email> <password>)")
-			return nil
-		}
-		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(w, "ID\tEMAIL\tADMIN\tCREATED_AT")
-		for _, u := range all {
-			fmt.Fprintf(w, "%s\t%s\t%v\t%s\n",
-				u.ID, u.Email, u.IsAdmin, u.CreatedAt.Format(time.RFC3339))
-		}
-		return w.Flush()
-
+		return runUsersList(ctx, store)
 	case "promote":
-		if len(args) < 2 {
-			return usageErr("users promote: need <email>")
-		}
-		email := args[1]
-		u, err := store.GetByEmail(ctx, email)
-		if err != nil {
-			return fmt.Errorf("lookup %q: %w", email, err)
-		}
-		if u.IsAdmin {
-			fmt.Printf("user %s is already admin\n", u.Email)
-			return nil
-		}
-		if err := store.SetAdmin(ctx, u.ID, true); err != nil {
-			return fmt.Errorf("promote: %w", err)
-		}
-		fmt.Printf("promoted %s to admin\n", u.Email)
-		return nil
-
+		return runUsersSetAdmin(ctx, store, args[1:], true)
 	case "demote":
-		if len(args) < 2 {
-			return usageErr("users demote: need <email>")
-		}
-		email := args[1]
-		u, err := store.GetByEmail(ctx, email)
-		if err != nil {
-			return fmt.Errorf("lookup %q: %w", email, err)
-		}
-		if !u.IsAdmin {
-			fmt.Printf("user %s is not admin\n", u.Email)
-			return nil
-		}
-		if err := store.SetAdmin(ctx, u.ID, false); err != nil {
-			return fmt.Errorf("demote: %w", err)
-		}
-		fmt.Printf("demoted %s\n", u.Email)
-		return nil
-
+		return runUsersSetAdmin(ctx, store, args[1:], false)
 	default:
 		return usageErr(fmt.Sprintf("users: unknown subcommand %q", args[0]))
 	}
+}
+
+func runUsersCreate(ctx context.Context, store *users.PostgresStore, args []string) error {
+	if len(args) < 2 {
+		return usageErr("users create: need <email> <password>")
+	}
+	u, err := store.Create(ctx, args[0], args[1])
+	if err != nil {
+		return fmt.Errorf("create: %w", err)
+	}
+	fmt.Printf("created user: id=%s email=%s\n", u.ID, u.Email)
+	return nil
+}
+
+func runUsersList(ctx context.Context, store *users.PostgresStore) error {
+	all, err := store.List(ctx)
+	if err != nil {
+		return fmt.Errorf("list users: %w", err)
+	}
+	if len(all) == 0 {
+		fmt.Println("(no users — run: idp users create <email> <password>)")
+		return nil
+	}
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "ID\tEMAIL\tADMIN\tCREATED_AT")
+	for _, u := range all {
+		fmt.Fprintf(w, "%s\t%s\t%v\t%s\n",
+			u.ID, u.Email, u.IsAdmin, u.CreatedAt.Format(time.RFC3339))
+	}
+	return w.Flush()
+}
+
+// runUsersSetAdmin handles both `promote` and `demote` — same code path
+// gated on the target flag value.
+func runUsersSetAdmin(ctx context.Context, store *users.PostgresStore, args []string, makeAdmin bool) error {
+	verb := "promote"
+	if !makeAdmin {
+		verb = "demote"
+	}
+	if len(args) < 1 {
+		return usageErr(fmt.Sprintf("users %s: need <email>", verb))
+	}
+	email := args[0]
+	u, err := store.GetByEmail(ctx, email)
+	if err != nil {
+		return fmt.Errorf("lookup %q: %w", email, err)
+	}
+	if u.IsAdmin == makeAdmin {
+		state := "already admin"
+		if !makeAdmin {
+			state = "not admin"
+		}
+		fmt.Printf("user %s is %s\n", u.Email, state)
+		return nil
+	}
+	if err := store.SetAdmin(ctx, u.ID, makeAdmin); err != nil {
+		return fmt.Errorf("%s: %w", verb, err)
+	}
+	if makeAdmin {
+		fmt.Printf("promoted %s to admin\n", u.Email)
+	} else {
+		fmt.Printf("demoted %s\n", u.Email)
+	}
+	return nil
 }
 
 // runServe boots the HTTP server and blocks until SIGINT/SIGTERM. On signal
@@ -1127,6 +1112,25 @@ func runKeys(args []string) error {
 	default:
 		return usageErr(fmt.Sprintf("keys: unknown subcommand %q", args[0]))
 	}
+}
+
+// openPool opens + pings the Postgres pool from DATABASE_URL. Caller
+// owns Close. Shared boilerplate for the non-keys subcommands (users,
+// groups, outbox) that don't need the KEK.
+func openPool(ctx context.Context) (*pgxpool.Pool, error) {
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		return nil, fmt.Errorf("DATABASE_URL not set")
+	}
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		return nil, fmt.Errorf("pgxpool.New: %w", err)
+	}
+	if err := pool.Ping(ctx); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("postgres ping: %w", err)
+	}
+	return pool, nil
 }
 
 // openDeps opens the Postgres pool + loads the KEK from env. Shared between

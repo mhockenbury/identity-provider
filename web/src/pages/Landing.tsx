@@ -38,7 +38,7 @@ export function Landing() {
   );
 }
 
-function FullScreenMessage({ children }: { children: React.ReactNode }) {
+function FullScreenMessage({ children }: Readonly<{children: React.ReactNode}>) {
   return (
     <div className="flex min-h-full items-center justify-center text-gray-600">
       {children}
