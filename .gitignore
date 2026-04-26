@@ -12,3 +12,8 @@ vendor/
 *.log
 node_modules
 web/node_modules
+
+# Sonar export outputs (script is committed; outputs aren't)
+sonar/sonarqube_issues.*
+sonar/__pycache__/
+sonar/.venv/

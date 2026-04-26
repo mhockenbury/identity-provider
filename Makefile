@@ -1,6 +1,6 @@
 export PATH := $(PATH):/usr/local/go/bin:$(HOME)/go/bin
 
-.PHONY: up down migrate run-idp run-outbox-worker run-docs-api test tidy build fmt vet web-install web-dev web-build
+.PHONY: up down migrate run-idp run-outbox-worker run-docs-api test tidy build fmt vet web-install web-dev web-build sonar-export
 .PHONY: up-app down-app restart-app status-app logs-idp logs-outbox-worker logs-docs-api up-all down-all _wait-deps check-deps
 .PHONY: dev-secrets dev-reset dev-key dev-user dev-all dev-serve oauth-url dev-flow check-deps-idp up-idp-only
 
@@ -56,6 +56,21 @@ web-dev:
 
 web-build:
 	cd web && npm run build
+
+# --- SonarCloud export ---
+# Pulls every issue from the SonarCloud project into a local xlsx/csv
+# for offline review. Reads SONAR_URL, SONAR_PROJECT_KEY, SONAR_TOKEN
+# from env (set them in /tmp/idp-env, which is gitignored).
+# See sonar/README.md for details. Override format with FMT=csv.
+FMT ?= xlsx
+sonar-export: sonar/.venv/bin/python
+	cd sonar && .venv/bin/python sonar_export.py --format $(FMT)
+
+# Lazy venv setup. Re-runs are no-ops once the marker file exists.
+sonar/.venv/bin/python:
+	@echo "==> creating sonar/.venv + installing requests pandas openpyxl"
+	@python3 -m venv sonar/.venv
+	@sonar/.venv/bin/pip install --quiet requests pandas openpyxl
 
 # --- App process lifecycle (background) ---
 # Same pattern as url-shortener. Three processes: idp, outbox-worker, docs-api.
