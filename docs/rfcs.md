@@ -77,7 +77,7 @@ Passkeys. Large spec; we use `github.com/go-webauthn/webauthn`.
 ### [RFC 9449 — DPoP](https://www.rfc-editor.org/rfc/rfc9449)
 Demonstrating Proof-of-Possession. Sender-constrains tokens with a client-held key.
 
-- **Stretch trigger:** demonstrate on one docs-api endpoint so matt feels why sender-constraining exists; not full implementation
+- **Stretch trigger:** demonstrate on one docs-api endpoint to feel why sender-constraining exists; not a full implementation
 
 ### [RFC 7523 — JWT Profile for Client Authentication](https://www.rfc-editor.org/rfc/rfc7523)
 Using JWTs (instead of client_secret) for client authentication at `/token`.

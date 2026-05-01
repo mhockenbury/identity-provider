@@ -45,7 +45,7 @@ propagate eventually."
 **Covered by:** core. `internal/outbox/{events,store,translate}.go` (`Enqueue(ctx, tx, event)` insists on a `pgx.Tx` so atomicity is compile-time-enforced), `cmd/outbox-worker/main.go` (claim batch via `SELECT FOR UPDATE SKIP LOCKED`, per-tuple coalescing across batch, attempt_count cap with poison-pill quarantine). **Status: ✓**
 **Verified by:** `scripts/docs_smoke.sh` end-to-end + `internal/outbox/*_test.go` unit tests; also exercised live via the admin UI's group-membership-CRUD which writes an outbox row, drained within ~1s.
 
-## Named learning gaps (matt's weak areas)
+## Named learning gaps (my weak areas)
 
 ### Issuer validation with multiple possible issuers
 Most tutorials show single-issuer validation and skip the hard part.
@@ -153,17 +153,6 @@ users/groups/outbox, sign out cleanly.
 
 ---
 
-## What I expect to feel at the end
+## End-state competencies
 
-By the time core is done, matt should be able to:
-
-- Walk through an OIDC flow from scratch without looking at a diagram
-- Explain what the `kid` in a JWT header is doing
-- Explain what `aud` is for and what happens if you ignore it
-- Describe the scope-vs-authz distinction in a sentence
-- Know where to look in the spec for "does this refresh token work across clients" (it doesn't)
-- Have internalized the outbox pattern well enough to apply it to unrelated projects
-- Read a token at `jwt.io` and tell you what's wrong with it
-- Design a JWKS rotation plan for a service consuming tokens from multiple IdPs
-
-Stretch goals expand this but are not required for the subproject to be "done."
+After core, I should be able to: walk an OIDC flow from scratch without a diagram; explain `kid`, `aud`, and the scope-vs-authz distinction in one sentence each; design a JWKS rotation plan for a multi-IdP consumer; and apply the outbox pattern to an unrelated project. Stretch goals expand this but aren't required for "done."
