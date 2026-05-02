@@ -55,6 +55,7 @@ import (
 
 	"github.com/mhockenbury/identity-provider/internal/fga"
 	"github.com/mhockenbury/identity-provider/internal/jwks"
+	"github.com/mhockenbury/identity-provider/internal/logging"
 	"github.com/mhockenbury/identity-provider/internal/tokens"
 )
 
@@ -71,7 +72,7 @@ func run() error {
 		return err
 	}
 
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.logLevel}))
+	logger := logging.New(os.Stdout, cfg.logLevel, logging.FormatFromEnv())
 	slog.SetDefault(logger)
 
 	rootCtx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

@@ -50,6 +50,7 @@ import (
 	"github.com/openfga/go-sdk/client"
 
 	"github.com/mhockenbury/identity-provider/internal/fga"
+	"github.com/mhockenbury/identity-provider/internal/logging"
 	"github.com/mhockenbury/identity-provider/internal/outbox"
 )
 
@@ -114,7 +115,7 @@ func run() error {
 		return err
 	}
 
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.logLevel}))
+	logger := logging.New(os.Stdout, cfg.logLevel, logging.FormatFromEnv())
 	slog.SetDefault(logger)
 
 	rootCtx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

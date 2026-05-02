@@ -54,6 +54,7 @@ import (
 	"github.com/mhockenbury/identity-provider/internal/fga"
 	myhttp "github.com/mhockenbury/identity-provider/internal/http"
 	"github.com/mhockenbury/identity-provider/internal/http/admin"
+	"github.com/mhockenbury/identity-provider/internal/logging"
 	"github.com/mhockenbury/identity-provider/internal/oauth"
 	"github.com/mhockenbury/identity-provider/internal/oidc"
 	"github.com/mhockenbury/identity-provider/internal/outbox"
@@ -665,9 +666,9 @@ func runServe() error {
 		return err
 	}
 
-	// Structured JSON logs so `logs-idp` in the Makefile's background
-	// runner pattern can be ingested by anything grep-friendly.
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.logLevel}))
+	// JSON by default (production / aggregation), pretty-tint colored
+	// lines when LOG_FORMAT=pretty (set by `make dev-up`).
+	logger := logging.New(os.Stdout, cfg.logLevel, logging.FormatFromEnv())
 	slog.SetDefault(logger)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

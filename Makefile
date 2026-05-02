@@ -2,7 +2,7 @@ export PATH := $(PATH):/usr/local/go/bin:$(HOME)/go/bin
 
 .PHONY: up down migrate run-idp run-outbox-worker run-docs-api test tidy build fmt vet web-install web-dev web-build sonar-export
 .PHONY: up-app down-app restart-app status-app logs-idp logs-outbox-worker logs-docs-api up-all down-all _wait-deps check-deps
-.PHONY: dev-secrets dev-reset dev-key dev-user dev-fga dev-seed-alice dev-all dev-serve dev-up dev-down dev-status dev-logs oauth-url dev-flow check-deps-idp up-idp-only
+.PHONY: dev-secrets dev-reset dev-key dev-user dev-fga dev-seed-alice dev-all dev-serve dev-up dev-down dev-status dev-logs dev-tail oauth-url dev-flow check-deps-idp up-idp-only
 
 up:
 	docker compose up -d
@@ -339,12 +339,13 @@ dev-up: build dev-secrets dev-fga dev-seed-alice
 		$(MAKE) web-install; \
 	fi
 	@echo "==> starting backgrounded services (logs in $(DEV_LOG_DIR)/idp-*.log)"
-	@. "$(DEV_ENV_FILE)" && nohup ./bin/idp serve > $(DEV_LOG_DIR)/idp-idp.log 2>&1 & echo $$! > $(DEV_LOG_DIR)/idp-idp.pid
-	@. "$(DEV_ENV_FILE)" && nohup ./bin/outbox-worker > $(DEV_LOG_DIR)/idp-outbox.log 2>&1 & echo $$! > $(DEV_LOG_DIR)/idp-outbox.pid
+	@. "$(DEV_ENV_FILE)" && LOG_FORMAT=pretty nohup ./bin/idp serve > $(DEV_LOG_DIR)/idp-idp.log 2>&1 & echo $$! > $(DEV_LOG_DIR)/idp-idp.pid
+	@. "$(DEV_ENV_FILE)" && LOG_FORMAT=pretty nohup ./bin/outbox-worker > $(DEV_LOG_DIR)/idp-outbox.log 2>&1 & echo $$! > $(DEV_LOG_DIR)/idp-outbox.pid
 	@. "$(DEV_ENV_FILE)" && \
 		TRUSTED_ISSUERS=http://localhost:8080 \
 		REQUIRED_AUD=docs-api \
 		ALLOWED_ORIGINS=http://localhost:5173 \
+		LOG_FORMAT=pretty \
 		nohup ./bin/docs-api > $(DEV_LOG_DIR)/idp-docs.log 2>&1 & \
 		echo $$! > $(DEV_LOG_DIR)/idp-docs.pid
 	@cd web && nohup npm run dev > $(DEV_LOG_DIR)/idp-web.log 2>&1 & echo $$! > $(DEV_LOG_DIR)/idp-web.pid
@@ -374,6 +375,16 @@ dev-down:
 			rm -f "$$pidfile"; \
 		fi; \
 	done
+	@# Belt-and-suspenders: catch processes whose PID file got out of
+	@# sync (e.g. from a half-failed dev-up). pgrep is exact-match on
+	@# the basename, which won't match the make/sh wrapper processes.
+	@for binname in idp outbox-worker docs-api; do \
+		pids=$$(pgrep -x "$$binname" 2>/dev/null || true); \
+		if [ -n "$$pids" ]; then \
+			echo "stopping orphan $$binname (pids $$pids)"; \
+			kill $$pids 2>/dev/null || true; \
+		fi; \
+	done
 
 dev-status:
 	@for pidfile in $(DEV_PIDS); do \
@@ -391,6 +402,41 @@ dev-logs:
 		exit 1; \
 	fi; \
 	tail -f $(DEV_LOG_DIR)/idp-$(SVC).log
+
+# Tail all four service logs in a tmux 2x2 grid. Each pane runs
+# `tail -f` on one of the log files; tint colors render natively.
+# Ctrl-B then arrows to navigate panes, Ctrl-B [ for scrollback,
+# Ctrl-B d to detach (services keep running), Ctrl-B & to kill the
+# session.
+#
+# Reuses an existing session if one is already attached.
+DEV_TAIL_SESSION := idp-dev
+
+dev-tail:
+	@command -v tmux >/dev/null || { \
+		echo "ERROR: tmux not found — run: sudo apt install tmux"; \
+		exit 1; \
+	}
+	@if tmux has-session -t $(DEV_TAIL_SESSION) 2>/dev/null; then \
+		tmux attach -t $(DEV_TAIL_SESSION); \
+	else \
+		tmux new-session -d -s $(DEV_TAIL_SESSION) -n logs \
+			"tail -fn 200 $(DEV_LOG_DIR)/idp-idp.log"; \
+		tmux split-window  -h -t $(DEV_TAIL_SESSION):logs \
+			"tail -fn 200 $(DEV_LOG_DIR)/idp-outbox.log"; \
+		tmux split-window  -v -t $(DEV_TAIL_SESSION):logs.0 \
+			"tail -fn 200 $(DEV_LOG_DIR)/idp-docs.log"; \
+		tmux split-window  -v -t $(DEV_TAIL_SESSION):logs.2 \
+			"tail -fn 200 $(DEV_LOG_DIR)/idp-web.log"; \
+		tmux select-layout -t $(DEV_TAIL_SESSION):logs tiled; \
+		tmux set-option -t $(DEV_TAIL_SESSION) -g pane-border-status top; \
+		tmux set-option -t $(DEV_TAIL_SESSION) -g pane-border-format " #{pane_index}: #{pane_current_command} #{pane_title} "; \
+		tmux select-pane -t $(DEV_TAIL_SESSION):logs.0 -T "idp"; \
+		tmux select-pane -t $(DEV_TAIL_SESSION):logs.1 -T "docs"; \
+		tmux select-pane -t $(DEV_TAIL_SESSION):logs.2 -T "outbox"; \
+		tmux select-pane -t $(DEV_TAIL_SESSION):logs.3 -T "web"; \
+		tmux attach -t $(DEV_TAIL_SESSION); \
+	fi
 
 # Print a ready-to-paste /authorize URL with a fresh PKCE challenge.
 # Prints the code_verifier too — you'll need it when exchanging the
