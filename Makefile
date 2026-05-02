@@ -19,7 +19,7 @@ migrate:
 	done
 
 run-idp:
-	go run ./cmd/idp
+	go run ./cmd/idp serve
 
 run-outbox-worker:
 	go run ./cmd/outbox-worker
@@ -227,6 +227,7 @@ dev-secrets:
 		echo "export DATABASE_URL=$(DEV_DATABASE_URL)"; \
 		echo "export JWT_SIGNING_KEY_ENCRYPTION_KEY=$$kek"; \
 		echo "export CSRF_KEY=$$csrf"; \
+		echo "export ALLOWED_ORIGINS=http://localhost:5173"; \
 	} > "$(DEV_ENV_FILE)"; \
 	echo "wrote $(DEV_ENV_FILE)"
 
