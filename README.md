@@ -298,39 +298,45 @@ N/A by scope. (If real: token endpoint is hot path; Postgres bottlenecks first; 
 cd ~/Projects/sysdesign-lab/identity-provider
 
 # 1. Infra
-docker compose up -d
+make up                     # docker compose up -d
 make migrate
 
-# 2. First-time secrets + signing key + dev user + FGA store
+# 2. First-time bootstrap: secrets + signing key + dev user + FGA store
+#    + alice's UUID seed. Idempotent on re-run.
 make dev-all
-source /tmp/idp-env
-go run ./cmd/idp fga init   # prints OPENFGA_STORE_ID + AUTH_MODEL_ID
-# append both to /tmp/idp-env
 
-# 3. Run binaries (separate terminals)
-make run-idp                # :8080
-make run-outbox-worker
-ALICE_SUB=$(docker exec identity-provider-postgres-idp-1 \
-    psql -U idp -d idp -tAc "SELECT id FROM users WHERE email='smoke-alice@example.com'")
-TRUSTED_ISSUERS=http://localhost:8080 REQUIRED_AUD=docs-api \
-DOCS_SEED_ALICE=$ALICE_SUB ALLOWED_ORIGINS=http://localhost:5173 \
-    make run-docs-api       # :8083
+# 3. One-time SPA dependency install
+make web-install
 
-# 4. Frontend
-make web-install            # one-time
-make web-dev                # :5173
+# 4. Start everything backgrounded (idp + outbox-worker + docs-api + vite).
+#    Logs in /tmp/idp-*.log. Tint-colored when LOG_FORMAT=pretty (set by
+#    dev-up).
+make dev-up
 
-# 5. Smoke
+# 5. Watch the four service logs in a tmux 2x2 grid (Ctrl-B d to detach
+#    without stopping services; Ctrl-B + arrows to navigate panes).
+make dev-tail
+
+# 6. Browser: http://localhost:5173. Log in as
+#      smoke-alice@example.com / correct-horse-battery-staple
+#    For admin UI: visit /admin (separate login under the admin client).
+#    First time, promote alice:
+./bin/idp users promote smoke-alice@example.com
+#    Then sign out and back in to pick up the admin scope.
+
+# 7. Stop everything
+make dev-down               # backgrounded services
+make down                   # docker compose
+
+# Smoke scripts (run while dev-up is up):
 bash scripts/dev_flow.sh    # protocol regression via curl
 bash scripts/docs_smoke.sh  # full triangle: token → docs-api → FGA Check
-
-# 6. Browser: http://localhost:5173, log in as smoke-alice@example.com /
-#    correct-horse-battery-staple. Docs UI loads.
-#    For admin UI: visit http://localhost:5173/admin (you'll be prompted
-#    to log in again under the admin client). First time, promote alice:
-go run ./cmd/idp users promote smoke-alice@example.com
-# (sign out and back in to pick up the admin scope)
 ```
+
+For one-service-in-foreground debugging (when you want crashes to hit
+your terminal directly), `make dev-serve` runs only the IdP. The other
+two services need a manual `LOG_FORMAT=pretty ./bin/<svc>` invocation
+in that case.
 
 ## 10. Benchmarks
 

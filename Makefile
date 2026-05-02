@@ -1,7 +1,6 @@
 export PATH := $(PATH):/usr/local/go/bin:$(HOME)/go/bin
 
-.PHONY: up down migrate run-idp run-outbox-worker run-docs-api test tidy build fmt vet web-install web-dev web-build sonar-export
-.PHONY: up-app down-app restart-app status-app logs-idp logs-outbox-worker logs-docs-api up-all down-all _wait-deps check-deps
+.PHONY: up down migrate test tidy build fmt vet web-install web-dev web-build sonar-export
 .PHONY: dev-secrets dev-reset dev-key dev-user dev-fga dev-seed-alice dev-all dev-serve dev-up dev-down dev-status dev-logs dev-tail oauth-url dev-flow check-deps-idp up-idp-only
 
 up:
@@ -17,15 +16,6 @@ migrate:
 		echo "--> $$f"; \
 		docker compose exec -T postgres-idp psql -v ON_ERROR_STOP=1 -U idp -d idp < "$$f" || exit 1; \
 	done
-
-run-idp:
-	go run ./cmd/idp serve
-
-run-outbox-worker:
-	go run ./cmd/outbox-worker
-
-run-docs-api:
-	go run ./cmd/docs-api
 
 test:
 	@# web/node_modules contains a third-party package that ships a Go
@@ -72,92 +62,10 @@ sonar/.venv/bin/python:
 	@python3 -m venv sonar/.venv
 	@sonar/.venv/bin/pip install --quiet requests pandas openpyxl
 
-# --- App process lifecycle (background) ---
-# Same pattern as url-shortener. Three processes: idp, outbox-worker, docs-api.
-# PID + log files under run/ (gitignored). Preserves graceful-shutdown path.
-
-RUN_DIR := run
-APPS    := idp outbox-worker docs-api
-
-up-app: build check-deps
-	@mkdir -p $(RUN_DIR)
-	@for svc in $(APPS); do $(MAKE) --no-print-directory _start-proc NAME=$$svc; done
-	@$(MAKE) --no-print-directory status-app
-
-down-app:
-	@for svc in $(APPS); do $(MAKE) --no-print-directory _stop-proc NAME=$$svc; done
-
-restart-app: down-app up-app
-
-status-app:
-	@for svc in $(APPS); do \
-		pidfile="$(RUN_DIR)/$$svc.pid"; \
-		if [ -f "$$pidfile" ] && kill -0 $$(cat "$$pidfile") 2>/dev/null; then \
-			echo "$$svc: running (pid $$(cat $$pidfile), log $(RUN_DIR)/$$svc.log)"; \
-		else \
-			echo "$$svc: stopped"; \
-		fi; \
-	done
-
-logs-idp:             ; tail -f $(RUN_DIR)/idp.log
-logs-outbox-worker:   ; tail -f $(RUN_DIR)/outbox-worker.log
-logs-docs-api:        ; tail -f $(RUN_DIR)/docs-api.log
-
-up-all: up _wait-deps up-app
-down-all: down-app
-	docker compose stop
-
-# --- helpers ---
-
-_start-proc:
-	@pidfile="$(RUN_DIR)/$(NAME).pid"; \
-	logfile="$(RUN_DIR)/$(NAME).log"; \
-	if [ -f "$$pidfile" ] && kill -0 $$(cat "$$pidfile") 2>/dev/null; then \
-		echo "$(NAME): already running (pid $$(cat $$pidfile))"; \
-		exit 0; \
-	fi; \
-	rm -f "$$pidfile"; \
-	nohup ./bin/$(NAME) > "$$logfile" 2>&1 & echo $$! > "$$pidfile"; \
-	echo "$(NAME): started (pid $$(cat $$pidfile), log $$logfile)"
-
-_stop-proc:
-	@pidfile="$(RUN_DIR)/$(NAME).pid"; \
-	if [ ! -f "$$pidfile" ]; then \
-		echo "$(NAME): no pid file, skipping"; \
-		exit 0; \
-	fi; \
-	pid=$$(cat "$$pidfile"); \
-	if ! kill -0 $$pid 2>/dev/null; then \
-		echo "$(NAME): stale pid file (pid $$pid not running), removing"; \
-		rm -f "$$pidfile"; \
-		exit 0; \
-	fi; \
-	kill -TERM $$pid; \
-	for i in $$(seq 1 15); do \
-		if ! kill -0 $$pid 2>/dev/null; then \
-			echo "$(NAME): stopped (pid $$pid)"; \
-			rm -f "$$pidfile"; \
-			exit 0; \
-		fi; \
-		sleep 1; \
-	done; \
-	echo "$(NAME): did not exit within 15s, SIGKILL"; \
-	kill -KILL $$pid 2>/dev/null; \
-	rm -f "$$pidfile"
-
-check-deps:
-	@for svc in postgres-idp postgres-fga openfga; do \
-		status=$$(docker inspect --format='{{.State.Health.Status}}' identity-provider-$$svc-1 2>/dev/null || echo "missing"); \
-		if [ "$$status" != "healthy" ]; then \
-			echo "ERROR: compose service '$$svc' is '$$status' — run 'make up' and wait for deps to be healthy."; \
-			exit 1; \
-		fi; \
-	done
-
-# check-deps-idp is the narrower variant for dev-* targets: only the IdP's
-# Postgres needs to be healthy. Layers 1–7 don't touch FGA; requiring
-# postgres-fga + openfga here would force people running `make dev-all` to
-# spin up services they don't need.
+# check-deps-idp is the narrower dep-check used by dev-* targets: only
+# the IdP's Postgres needs to be healthy. Layers 1–7 don't touch FGA;
+# requiring postgres-fga + openfga here would force people running
+# `make dev-all` to spin up services they don't need.
 check-deps-idp:
 	@status=$$(docker inspect --format='{{.State.Health.Status}}' identity-provider-postgres-idp-1 2>/dev/null || echo "missing"); \
 	if [ "$$status" != "healthy" ]; then \
@@ -177,23 +85,6 @@ up-idp-only:
 		sleep 1; \
 	done; \
 	echo "ERROR: postgres-idp did not become healthy within 30s"; exit 1
-
-_wait-deps:
-	@echo "waiting for compose services to be healthy..."
-	@for i in $$(seq 1 60); do \
-		all_healthy=true; \
-		for svc in postgres-idp postgres-fga openfga; do \
-			status=$$(docker inspect --format='{{.State.Health.Status}}' identity-provider-$$svc-1 2>/dev/null || echo "missing"); \
-			if [ "$$status" != "healthy" ]; then all_healthy=false; break; fi; \
-		done; \
-		if [ "$$all_healthy" = "true" ]; then \
-			echo "all deps healthy"; \
-			exit 0; \
-		fi; \
-		sleep 1; \
-	done; \
-	echo "ERROR: compose services did not become healthy within 60s"; \
-	exit 1
 
 # --- Dev commands ---
 #
