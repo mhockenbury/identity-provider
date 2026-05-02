@@ -43,6 +43,10 @@ type User struct {
 // on this interface, not on *pgxpool.Pool directly.
 type Store interface {
 	Create(ctx context.Context, email, password string) (User, error)
+	// CreateWithID lets callers (test fixtures, dev seed scripts) pin a
+	// specific UUID. Production user creation should use Create() and
+	// let Postgres mint the UUID.
+	CreateWithID(ctx context.Context, id uuid.UUID, email, password string) (User, error)
 	GetByEmail(ctx context.Context, email string) (User, error)
 	GetByID(ctx context.Context, id uuid.UUID) (User, error)
 	List(ctx context.Context) ([]User, error)
@@ -76,9 +80,23 @@ func NewPostgresStoreWithParams(pool *pgxpool.Pool, params Argon2Params) *Postgr
 // password policy complexity here.
 const minPasswordLen = 8
 
-// Create inserts a new user. Email is lower-cased and whitespace-trimmed
-// before storage. Returns ErrEmailTaken on unique-constraint conflict.
+// Create inserts a new user with a Postgres-generated UUID. Email is
+// lower-cased + trimmed. Returns ErrEmailTaken on unique-constraint
+// conflict.
 func (s *PostgresStore) Create(ctx context.Context, email, password string) (User, error) {
+	return s.createInternal(ctx, uuid.Nil, email, password)
+}
+
+// CreateWithID is the explicit-UUID form. uuid.Nil is rejected — use
+// Create() if you don't care about the UUID.
+func (s *PostgresStore) CreateWithID(ctx context.Context, id uuid.UUID, email, password string) (User, error) {
+	if id == uuid.Nil {
+		return User{}, fmt.Errorf("CreateWithID: id is nil; use Create() for auto-assigned UUID")
+	}
+	return s.createInternal(ctx, id, email, password)
+}
+
+func (s *PostgresStore) createInternal(ctx context.Context, id uuid.UUID, email, password string) (User, error) {
 	email = strings.ToLower(strings.TrimSpace(email))
 	if !looksLikeEmail(email) {
 		return User{}, ErrInvalidEmail
@@ -92,13 +110,15 @@ func (s *PostgresStore) Create(ctx context.Context, email, password string) (Use
 		return User{}, fmt.Errorf("hash password: %w", err)
 	}
 
+	// COALESCE on $1 lets us pass uuid.Nil and have Postgres mint a
+	// fresh one — keeps both call paths on one query.
 	const q = `
-        INSERT INTO users (email, password_hash)
-        VALUES ($1, $2)
+        INSERT INTO users (id, email, password_hash)
+        VALUES (COALESCE(NULLIF($1, '00000000-0000-0000-0000-000000000000'::uuid), gen_random_uuid()), $2, $3)
         RETURNING id, email, password_hash, created_at, is_admin`
 
 	var u User
-	err = s.pool.QueryRow(ctx, q, email, hash).Scan(
+	err = s.pool.QueryRow(ctx, q, id, email, hash).Scan(
 		&u.ID, &u.Email, &u.PasswordHash, &u.CreatedAt, &u.IsAdmin)
 	if err != nil {
 		var pgErr *pgconn.PgError

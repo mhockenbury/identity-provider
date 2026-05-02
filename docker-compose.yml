@@ -17,6 +17,25 @@ services:
       timeout: 2s
       retries: 10
 
+  # Service-owned DB for the docs-api. Separate from postgres-idp so
+  # the docs product enforces its own schema boundary (the pattern I4/I5
+  # will compose into a real auth-gateway story).
+  postgres-docs:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: docs
+      POSTGRES_PASSWORD: docs
+      POSTGRES_DB: docs
+    ports:
+      - "5435:5432"
+    volumes:
+      - pgdata-docs:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U docs"]
+      interval: 2s
+      timeout: 2s
+      retries: 10
+
   postgres-fga:
     image: postgres:16-alpine
     environment:
@@ -70,4 +89,5 @@ services:
 
 volumes:
   pgdata-idp:
+  pgdata-docs:
   pgdata-fga:

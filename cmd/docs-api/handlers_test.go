@@ -56,7 +56,7 @@ func (f *fakeChecker) allow(user, relation, object string) {
 // test stub that just injects pre-built claims. That way we don't have
 // to mint + verify a real JWT in every test; the auth-middleware
 // surface is covered by auth_test.go.
-func newTestRouter(t *testing.T, sub, scope string, store *Store, fga fgaChecker) http.Handler {
+func newTestRouter(t *testing.T, sub, scope string, store documentStore, fga fgaChecker) http.Handler {
 	t.Helper()
 	r := chi.NewRouter()
 	r.Group(func(r chi.Router) {
@@ -89,16 +89,93 @@ func injectClaims(sub, scope string) func(http.Handler) http.Handler {
 	}
 }
 
-// seedStoreForTests builds a minimal store — two docs in two folders.
+// fakeStore is the in-memory documentStore used by handler tests.
+// Production uses *Store (Postgres/sqlc), tests use this — same
+// interface, no DB.
+type fakeStore struct {
+	docs    map[string]Document
+	folders map[string]Folder
+}
+
+func newFakeStore() *fakeStore {
+	return &fakeStore{docs: map[string]Document{}, folders: map[string]Folder{}}
+}
+
+func (s *fakeStore) GetDoc(_ context.Context, id string) (Document, error) {
+	d, ok := s.docs[id]
+	if !ok {
+		return Document{}, ErrNotFound
+	}
+	return d, nil
+}
+func (s *fakeStore) GetFolder(_ context.Context, id string) (Folder, error) {
+	f, ok := s.folders[id]
+	if !ok {
+		return Folder{}, ErrNotFound
+	}
+	return f, nil
+}
+func (s *fakeStore) ListFolders(_ context.Context) ([]Folder, error) {
+	out := make([]Folder, 0, len(s.folders))
+	for _, f := range s.folders {
+		out = append(out, f)
+	}
+	return out, nil
+}
+func (s *fakeStore) ListDocs(_ context.Context) ([]Document, error) {
+	out := make([]Document, 0, len(s.docs))
+	for _, d := range s.docs {
+		out = append(out, d)
+	}
+	return out, nil
+}
+func (s *fakeStore) ListFolderDocs(_ context.Context, folderID string) ([]Document, error) {
+	var out []Document
+	for _, d := range s.docs {
+		if d.FolderID == folderID {
+			out = append(out, d)
+		}
+	}
+	return out, nil
+}
+func (s *fakeStore) CreateDocument(_ context.Context, folderID, title, body, ownerSub string) (Document, error) {
+	id := fmt.Sprintf("new-%d", len(s.docs)+1)
+	d := Document{ID: id, FolderID: folderID, Title: title, Body: body, OwnerSub: ownerSub}
+	s.docs[id] = d
+	return d, nil
+}
+func (s *fakeStore) UpdateDocument(_ context.Context, id, title, body string) (Document, error) {
+	d, ok := s.docs[id]
+	if !ok {
+		return Document{}, ErrNotFound
+	}
+	if title != "" {
+		d.Title = title
+	}
+	if body != "" {
+		d.Body = body
+	}
+	s.docs[id] = d
+	return d, nil
+}
+func (s *fakeStore) DeleteDocument(_ context.Context, id string) error {
+	if _, ok := s.docs[id]; !ok {
+		return ErrNotFound
+	}
+	delete(s.docs, id)
+	return nil
+}
+
+// seedStoreForTests builds a minimal store — three docs in two folders.
 // Deliberately doesn't use the full SeedCorpus so test expectations
 // are obvious at the call site.
-func seedStoreForTests() *Store {
-	s := NewStore()
-	s.AddFolder(Folder{ID: "f1", Name: "F1"})
-	s.AddFolder(Folder{ID: "f2", Name: "F2"})
-	s.AddDocument(Document{ID: "d1", FolderID: "f1", Title: "Doc 1"})
-	s.AddDocument(Document{ID: "d2", FolderID: "f2", Title: "Doc 2"})
-	s.AddDocument(Document{ID: "d3", Title: "Orphan Doc"})
+func seedStoreForTests() *fakeStore {
+	s := newFakeStore()
+	s.folders["f1"] = Folder{ID: "f1", Name: "F1"}
+	s.folders["f2"] = Folder{ID: "f2", Name: "F2"}
+	s.docs["d1"] = Document{ID: "d1", FolderID: "f1", Title: "Doc 1"}
+	s.docs["d2"] = Document{ID: "d2", FolderID: "f2", Title: "Doc 2"}
+	s.docs["d3"] = Document{ID: "d3", Title: "Orphan Doc"}
 	return s
 }
 
@@ -338,7 +415,7 @@ func TestUpdateDoc_Editor_200(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d (body=%q)", w.Code, w.Body.String())
 	}
-	got, _ := store.GetDoc("d1")
+	got, _ := store.GetDoc(context.Background(), "d1")
 	if got.Title != "Updated" {
 		t.Errorf("title = %q, want Updated", got.Title)
 	}

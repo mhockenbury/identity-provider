@@ -1,7 +1,7 @@
 export PATH := $(PATH):/usr/local/go/bin:$(HOME)/go/bin
 
-.PHONY: up down migrate test tidy build fmt vet web-install web-dev web-build sonar-export
-.PHONY: dev-secrets dev-reset dev-key dev-user dev-fga dev-seed-alice dev-all dev-serve dev-up dev-down dev-status dev-logs dev-tail oauth-url dev-flow check-deps-idp up-idp-only
+.PHONY: up down migrate migrate-docs test tidy build fmt vet web-install web-dev web-build sonar-export
+.PHONY: dev-secrets dev-reset dev-key dev-user dev-fga dev-grant dev-all dev-serve dev-up dev-down dev-status dev-logs dev-tail oauth-url dev-flow check-deps-idp up-idp-only
 
 up:
 	docker compose up -d
@@ -16,6 +16,18 @@ migrate:
 		echo "--> $$f"; \
 		docker compose exec -T postgres-idp psql -v ON_ERROR_STOP=1 -U idp -d idp < "$$f" || exit 1; \
 	done
+
+# Goose-driven migrations for postgres-docs. Tracks applied versions in
+# the goose_db_version table so re-running is idempotent.
+DOCS_DSN := postgres://docs:docs@localhost:5435/docs?sslmode=disable
+
+migrate-docs:
+	@command -v goose >/dev/null || { \
+		echo "ERROR: goose not found — install: go install github.com/pressly/goose/v3/cmd/goose@latest"; \
+		exit 1; \
+	}
+	@echo "==> applying docs-api migrations (goose)"
+	@goose -dir cmd/docs-api/migrations postgres "$(DOCS_DSN)" up
 
 test:
 	@# web/node_modules contains a third-party package that ships a Go
@@ -104,6 +116,14 @@ DEV_DATABASE_URL  := postgres://idp:idp@localhost:5434/idp?sslmode=disable
 DEV_USER_EMAIL    := smoke-alice@example.com
 DEV_USER_PASSWORD := correct-horse-battery-staple
 DEV_CLIENT_ID     := localdev
+# Stable UUID for the dev user. Pinned so seeded FGA tuples + tests
+# don't drift across `make dev-reset`. Production user creation does
+# not pin UUIDs — only this dev seed path uses --id.
+DEV_USER_ID       := aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa
+# IDs from cmd/docs-api/migrations/0002_seed.sql (and seed_ids.go).
+DEV_FOLDER_PUBLIC      := 11111111-1111-1111-1111-000000000003
+DEV_FOLDER_ENGINEERING := 11111111-1111-1111-1111-000000000001
+DEV_DOC_PRIVATE        := 22222222-2222-2222-2222-000000000005
 
 # Write fresh KEK + CSRF keys to /tmp/idp-env. Idempotent: skipped if
 # file exists unless FORCE=1 is set.
@@ -151,14 +171,16 @@ dev-key: build check-deps-idp
 		./bin/idp keys activate "$$pending"; \
 	} || { echo "ERROR: make sure $(DEV_ENV_FILE) exists (run: make dev-secrets)"; exit 1; }
 
-# Create the default dev user. Idempotent — skips if the email already exists.
+# Create the default dev user with a stable, hardcoded UUID. Pinning the
+# UUID lets seed grants (dev-grant) and integration tests reference alice
+# without re-discovering her ID after every dev-reset.
 dev-user: build check-deps-idp
 	@. "$(DEV_ENV_FILE)" 2>/dev/null && { \
 		if ./bin/idp users list 2>/dev/null | grep -q "$(DEV_USER_EMAIL)"; then \
 			echo "user $(DEV_USER_EMAIL) already exists"; \
 			exit 0; \
 		fi; \
-		./bin/idp users create "$(DEV_USER_EMAIL)" "$(DEV_USER_PASSWORD)"; \
+		./bin/idp users create "$(DEV_USER_EMAIL)" "$(DEV_USER_PASSWORD)" --id "$(DEV_USER_ID)"; \
 	} || { echo "ERROR: make sure $(DEV_ENV_FILE) exists (run: make dev-secrets)"; exit 1; }
 
 # Initialize OpenFGA store + authorization model. Idempotent: if
@@ -175,26 +197,27 @@ dev-fga: build check-deps-idp
 		| sed 's/^[[:space:]]*//' >> "$(DEV_ENV_FILE)"; \
 	echo "wrote OPENFGA_STORE_ID + OPENFGA_AUTHORIZATION_MODEL_ID to $(DEV_ENV_FILE)"
 
-# Append DOCS_SEED_ALICE=<alice's UUID> to the env file. Idempotent.
-# docs-api reads this to seed FGA tuples that grant alice access to the
-# demo doc/folder corpus.
-dev-seed-alice: build check-deps-idp
-	@if grep -q '^export DOCS_SEED_ALICE=' "$(DEV_ENV_FILE)" 2>/dev/null; then \
-		echo "DOCS_SEED_ALICE already in $(DEV_ENV_FILE)"; \
-		exit 0; \
-	fi; \
-	alice=$$(docker compose exec -T postgres-idp psql -U idp -d idp -tAc \
-		"SELECT id FROM users WHERE email='$(DEV_USER_EMAIL)'" 2>/dev/null | tr -d '[:space:]'); \
-	if [ -z "$$alice" ]; then \
-		echo "ERROR: $(DEV_USER_EMAIL) not found in DB (run: make dev-user)"; \
-		exit 1; \
-	fi; \
-	echo "export DOCS_SEED_ALICE=$$alice" >> "$(DEV_ENV_FILE)"; \
-	echo "wrote DOCS_SEED_ALICE=$$alice to $(DEV_ENV_FILE)"
+# Grant alice the seeded-corpus permissions. Calls `docs-api grant`
+# directly — service boundary stays clean (no envvar for "alice's UUID";
+# the IdP and docs-api don't need to share that). Idempotent because
+# FGA Write with OnDuplicateWrites=ignore is a no-op on existing tuples.
+#
+# Defaults:
+#   • viewer on Public folder      — alice can read public docs
+#   • editor on Engineering folder — alice can edit eng docs
+#   • owner  on Private Notes      — alice can do anything to one doc
+dev-grant: build
+	@. "$(DEV_ENV_FILE)" && \
+		./bin/docs-api grant $(DEV_USER_ID) viewer folder:$(DEV_FOLDER_PUBLIC) && \
+		./bin/docs-api grant $(DEV_USER_ID) editor folder:$(DEV_FOLDER_ENGINEERING) && \
+		./bin/docs-api grant $(DEV_USER_ID) owner  document:$(DEV_DOC_PRIVATE)
 
-# All-in-one: secrets + reset + key + user + FGA + alice seed. The
+# All-in-one: secrets + reset + key + user + FGA + grants. The
 # "I haven't touched this in a week, just make it work" button.
-dev-all: dev-secrets dev-reset dev-key dev-user dev-fga dev-seed-alice
+#
+# migrate-docs runs before dev-grant so the seeded folder/document IDs
+# the grants reference actually exist in postgres-docs.
+dev-all: dev-secrets dev-reset dev-key dev-user dev-fga migrate-docs dev-grant
 	@echo
 	@echo "=== dev environment ready ==="
 	@echo "  user:     $(DEV_USER_EMAIL)"
@@ -224,7 +247,7 @@ dev-serve: build check-deps-idp
 DEV_LOG_DIR := /tmp
 DEV_PIDS    := $(DEV_LOG_DIR)/idp-idp.pid $(DEV_LOG_DIR)/idp-outbox.pid $(DEV_LOG_DIR)/idp-docs.pid $(DEV_LOG_DIR)/idp-web.pid
 
-dev-up: build dev-secrets dev-fga dev-seed-alice
+dev-up: build dev-secrets migrate-docs dev-fga dev-grant
 	@if [ ! -d web/node_modules ]; then \
 		echo "==> web/node_modules missing — running web-install"; \
 		$(MAKE) web-install; \

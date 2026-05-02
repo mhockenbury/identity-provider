@@ -41,7 +41,9 @@ loop:
 
 ### docs-api (`cmd/docs-api`)
 
-Separate binary on `:8083`. Deliberately minimal business logic; serves an in-memory doc + folder corpus so the SPA can exercise the full triangle (browser ↔ IdP ↔ resource server).
+Separate binary on `:8083`, owns its own Postgres (`postgres-docs` on host port 5435). Deliberately minimal business logic; serves a doc + folder corpus so the SPA can exercise the full triangle (browser ↔ IdP ↔ resource server).
+
+**Persistence:** [sqlc](https://sqlc.dev) generates a typed Go API from `cmd/docs-api/queries.sql`. Schema lives in `cmd/docs-api/migrations/`; [goose](https://pressly.github.io/goose/) applies it via `make migrate-docs`. The handler-facing `Store` (`corpus.go`) is a thin adapter over the generated `db.Queries` so wire-format types stay stable when the schema evolves. See [tradeoffs.md](tradeoffs.md) for why sqlc + goose over an ORM.
 
 ```
 authenticate (auth.go)

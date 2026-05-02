@@ -31,12 +31,26 @@ import (
 )
 
 // handlerDeps is what every resource handler needs. A superset of
-// routerDeps — adds Store and the raw FGA client (so POST /docs can
-// write the owner tuple). Built in main.go.
+// routerDeps — adds the documentStore + the raw FGA client (so POST
+// /docs can write the owner tuple). Built in main.go.
 type handlerDeps struct {
-	store        *Store
+	store        documentStore
 	fga          fgaChecker
 	fgaRawClient *openfgaclient.OpenFgaClient // for tuple writes from POST/DELETE
+}
+
+// documentStore is the narrow persistence surface the handlers depend
+// on. Production: *Store (Postgres-backed via sqlc). Tests: in-memory
+// fake. Same shape either way.
+type documentStore interface {
+	GetDoc(ctx context.Context, id string) (Document, error)
+	GetFolder(ctx context.Context, id string) (Folder, error)
+	ListFolders(ctx context.Context) ([]Folder, error)
+	ListDocs(ctx context.Context) ([]Document, error)
+	ListFolderDocs(ctx context.Context, folderID string) ([]Document, error)
+	CreateDocument(ctx context.Context, folderID, title, body, ownerSub string) (Document, error)
+	UpdateDocument(ctx context.Context, id, title, body string) (Document, error)
+	DeleteDocument(ctx context.Context, id string) error
 }
 
 // docResponse is the enriched JSON shape returned to clients. Wraps
@@ -109,7 +123,11 @@ func registerResourceRoutes(r chi.Router, h handlerDeps) {
 // to filter at the authz tier first, then batch-Check for tiers.
 func (h handlerDeps) listDocs(w http.ResponseWriter, r *http.Request) {
 	user := userFromClaims(claimsFromCtx(r.Context()))
-	all := h.store.ListDocs()
+	all, err := h.store.ListDocs(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "server_error", err.Error())
+		return
+	}
 	visible := make([]docResponse, 0, len(all))
 	for _, d := range all {
 		perm, err := h.resolvePermission(r, user, fga.TypeDocument,d.ID)
@@ -130,9 +148,13 @@ func (h handlerDeps) listDocs(w http.ResponseWriter, r *http.Request) {
 // exists but you can't see it" is worse than "this doc doesn't exist."
 func (h handlerDeps) getDoc(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	doc, ok := h.store.GetDoc(id)
-	if !ok {
-		writeError(w, http.StatusNotFound, "not_found", "document not found")
+	doc, err := h.store.GetDoc(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			writeError(w, http.StatusNotFound, "not_found", "document not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "server_error", err.Error())
 		return
 	}
 	user := userFromClaims(claimsFromCtx(r.Context()))
@@ -153,7 +175,11 @@ func (h handlerDeps) getDoc(w http.ResponseWriter, r *http.Request) {
 // permission tier on each. Used by the SPA's sidebar.
 func (h handlerDeps) listFolders(w http.ResponseWriter, r *http.Request) {
 	user := userFromClaims(claimsFromCtx(r.Context()))
-	all := h.store.ListFolders()
+	all, err := h.store.ListFolders(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "server_error", err.Error())
+		return
+	}
 	visible := make([]folderResponse, 0, len(all))
 	for _, f := range all {
 		perm, err := h.resolvePermission(r, user, fga.TypeFolder,f.ID)
@@ -172,9 +198,13 @@ func (h handlerDeps) listFolders(w http.ResponseWriter, r *http.Request) {
 // getFolder: viewer on the folder, response enriched with tier.
 func (h handlerDeps) getFolder(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	f, ok := h.store.GetFolder(id)
-	if !ok {
-		writeError(w, http.StatusNotFound, "not_found", "folder not found")
+	f, err := h.store.GetFolder(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			writeError(w, http.StatusNotFound, "not_found", "folder not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "server_error", err.Error())
 		return
 	}
 	user := userFromClaims(claimsFromCtx(r.Context()))
@@ -196,13 +226,17 @@ func (h handlerDeps) getFolder(w http.ResponseWriter, r *http.Request) {
 // Each returned doc carries its own permission tier.
 func (h handlerDeps) listFolderDocs(w http.ResponseWriter, r *http.Request) {
 	folderID := chi.URLParam(r, "id")
-	if _, ok := h.store.GetFolder(folderID); !ok {
-		writeError(w, http.StatusNotFound, "not_found", "folder not found")
+	if _, err := h.store.GetFolder(r.Context(), folderID); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			writeError(w, http.StatusNotFound, "not_found", "folder not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "server_error", err.Error())
 		return
 	}
 	user := userFromClaims(claimsFromCtx(r.Context()))
 
-	folderPerm, err := h.resolvePermission(r, user, fga.TypeFolder,folderID)
+	folderPerm, err := h.resolvePermission(r, user, fga.TypeFolder, folderID)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "authz_backend", err.Error())
 		return
@@ -212,7 +246,11 @@ func (h handlerDeps) listFolderDocs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	docs := h.store.ListFolderDocs(folderID)
+	docs, err := h.store.ListFolderDocs(r.Context(), folderID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "server_error", err.Error())
+		return
+	}
 	visible := make([]docResponse, 0, len(docs))
 	for _, d := range docs {
 		perm, err := h.resolvePermission(r, user, fga.TypeDocument,d.ID)
@@ -253,8 +291,12 @@ func (h handlerDeps) createDoc(w http.ResponseWriter, r *http.Request) {
 	// a folder you can view.
 	user := userFromClaims(claimsFromCtx(r.Context()))
 	if req.FolderID != "" {
-		if _, ok := h.store.GetFolder(req.FolderID); !ok {
-			writeError(w, http.StatusBadRequest, "bad_request", "folder not found")
+		if _, err := h.store.GetFolder(r.Context(), req.FolderID); err != nil {
+			if errors.Is(err, ErrNotFound) {
+				writeError(w, http.StatusBadRequest, "bad_request", "folder not found")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "server_error", err.Error())
 			return
 		}
 		allowed, err := h.fga.Check(r.Context(), user, fga.RelViewer, fga.TypeFolder+req.FolderID)
@@ -270,7 +312,11 @@ func (h handlerDeps) createDoc(w http.ResponseWriter, r *http.Request) {
 
 	// Strip "user:" prefix for OwnerSub — we store the sub itself.
 	sub := claimsFromCtx(r.Context()).Subject
-	doc := h.store.CreateDocument(req.FolderID, req.Title, req.Body, sub)
+	doc, err := h.store.CreateDocument(r.Context(), req.FolderID, req.Title, req.Body, sub)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "server_error", err.Error())
+		return
+	}
 
 	tuples := []openfgaclient.ClientTupleKey{
 		{User: user, Relation: fga.RelOwner, Object: fga.TypeDocument + doc.ID},
@@ -293,8 +339,12 @@ func (h handlerDeps) createDoc(w http.ResponseWriter, r *http.Request) {
 // updateDoc: editor on the doc.
 func (h handlerDeps) updateDoc(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	if _, ok := h.store.GetDoc(id); !ok {
-		writeError(w, http.StatusNotFound, "not_found", "document not found")
+	if _, err := h.store.GetDoc(r.Context(), id); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			writeError(w, http.StatusNotFound, "not_found", "document not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "server_error", err.Error())
 		return
 	}
 	user := userFromClaims(claimsFromCtx(r.Context()))
@@ -316,7 +366,7 @@ func (h handlerDeps) updateDoc(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", "malformed JSON")
 		return
 	}
-	doc, err := h.store.UpdateDocument(id, req.Title, req.Body)
+	doc, err := h.store.UpdateDocument(r.Context(), id, req.Title, req.Body)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			writeError(w, http.StatusNotFound, "not_found", "document not found")
@@ -331,8 +381,12 @@ func (h handlerDeps) updateDoc(w http.ResponseWriter, r *http.Request) {
 // deleteDoc: owner only. Also removes the owner tuple from FGA.
 func (h handlerDeps) deleteDoc(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	if _, ok := h.store.GetDoc(id); !ok {
-		writeError(w, http.StatusNotFound, "not_found", "document not found")
+	if _, err := h.store.GetDoc(r.Context(), id); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			writeError(w, http.StatusNotFound, "not_found", "document not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "server_error", err.Error())
 		return
 	}
 	user := userFromClaims(claimsFromCtx(r.Context()))
@@ -346,7 +400,7 @@ func (h handlerDeps) deleteDoc(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.store.DeleteDocument(id); err != nil {
+	if err := h.store.DeleteDocument(r.Context(), id); err != nil {
 		writeError(w, http.StatusInternalServerError, "server_error", err.Error())
 		return
 	}

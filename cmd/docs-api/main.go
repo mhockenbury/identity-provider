@@ -51,6 +51,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
+	"github.com/jackc/pgx/v5/pgxpool"
 	openfgaclient "github.com/openfga/go-sdk/client"
 
 	"github.com/mhockenbury/identity-provider/internal/fga"
@@ -60,11 +61,58 @@ import (
 )
 
 func main() {
+	// Subcommand dispatch. The default (no args) keeps the original
+	// behavior: boot the HTTP server. Subcommands are operator tools.
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "grant":
+			if err := runGrant(os.Args[2:]); err != nil {
+				fmt.Fprintf(os.Stderr, "fatal: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		case "serve":
+			// Explicit serve form for symmetry with `idp serve`.
+		case "help", "-h", "--help":
+			fmt.Print(usageText)
+			return
+		default:
+			fmt.Fprintf(os.Stderr, "unknown subcommand: %s\n\n", os.Args[1])
+			fmt.Fprint(os.Stderr, usageText)
+			os.Exit(2)
+		}
+	}
 	if err := run(); err != nil {
 		fmt.Fprintf(os.Stderr, "fatal: %v\n", err)
 		os.Exit(1)
 	}
 }
+
+const usageText = `usage: docs-api [<command>]
+
+Commands:
+  serve                                  run the docs-api HTTP server (default)
+  grant <user-uuid> <role> <resource>    write an FGA tuple granting the user
+                                         the role on the resource. Roles:
+                                         owner|editor|viewer. Resource:
+                                         folder:<uuid> or document:<uuid>.
+
+Env (grant + serve share OPENFGA_*):
+  OPENFGA_API_URL                  default http://localhost:8081
+  OPENFGA_STORE_ID                 required (run: idp fga init)
+  OPENFGA_AUTHORIZATION_MODEL_ID   required (run: idp fga init)
+  OPENFGA_API_TOKEN                optional bearer token
+
+Env (serve only):
+  HTTP_ADDR                        default :8083
+  DOCS_DATABASE_URL                default postgres://docs:docs@localhost:5435/docs?sslmode=disable
+  TRUSTED_ISSUERS                  required, comma-separated
+  REQUIRED_AUD                     default docs-api
+  ALLOWED_ORIGINS                  CORS origins, comma-separated
+  SHUTDOWN_GRACE                   default 15s
+  LOG_FORMAT                       json|pretty (default json)
+  LOG_LEVEL                        debug|info|warn|error (default info)
+`
 
 func run() error {
 	cfg, err := loadConfig()
@@ -108,28 +156,24 @@ func run() error {
 		slog.Warn("openfga ping failed — starting anyway", "err", err)
 	}
 
-	// Build the in-memory doc store + seed it. The owner on every
-	// seeded doc is a placeholder "seed" sub; per-user permissions
-	// come from FGA tuples, not from the OwnerSub field, so this only
-	// affects the displayed "owner" string.
-	store := NewStore()
-	SeedCorpus(store, "seed")
-
-	// Seed FGA tuples for the demo corpus. People map comes from env:
-	// DOCS_SEED_ALICE, DOCS_SEED_BOB, DOCS_SEED_CAROL, each set to the
-	// user's sub (UUID) as printed by `idp users list`.
-	//
-	// Empty values skip that user's tuples — the corpus still loads,
-	// the smoke test can inject fresh users via direct FGA writes.
-	seedCtx, seedCancel := context.WithTimeout(rootCtx, 5*time.Second)
-	defer seedCancel()
-	if err := SeedFGA(seedCtx, fgaClient, SeedPeople{
-		Alice: os.Getenv("DOCS_SEED_ALICE"),
-		Bob:   os.Getenv("DOCS_SEED_BOB"),
-		Carol: os.Getenv("DOCS_SEED_CAROL"),
-	}); err != nil {
-		slog.Warn("fga seed failed — starting anyway", "err", err)
+	// Open the docs Postgres pool. Schema + seed corpus are populated
+	// by goose migrations (cmd/docs-api/migrations/*.sql); docs-api
+	// itself just connects.
+	pool, err := pgxpool.New(rootCtx, cfg.databaseURL)
+	if err != nil {
+		return fmt.Errorf("open docs db: %w", err)
 	}
+	defer pool.Close()
+	if err := pool.Ping(rootCtx); err != nil {
+		return fmt.Errorf("ping docs db: %w", err)
+	}
+	slog.Info("postgres connected", "addr", redactDSN(cfg.databaseURL))
+	store := NewStore(pool)
+
+	// FGA tuples are NOT seeded here. Operator runs `docs-api grant`
+	// (or the dev-grant make target) after creating users. Keeps the
+	// service boundary clean: docs-api doesn't reach into the IdP's
+	// user table to discover who to grant defaults to.
 
 	router := newRouter(routerDeps{
 		verifier:       verifier,
@@ -180,6 +224,7 @@ func run() error {
 
 type config struct {
 	httpAddr       string
+	databaseURL    string
 	trustedIssuers []string
 	requiredAud    string
 	allowedOrigins []string
@@ -191,6 +236,7 @@ type config struct {
 func loadConfig() (config, error) {
 	cfg := config{
 		httpAddr:    envOr("HTTP_ADDR", ":8083"),
+		databaseURL: envOr("DOCS_DATABASE_URL", "postgres://docs:docs@localhost:5435/docs?sslmode=disable"),
 		requiredAud: envOr("REQUIRED_AUD", "docs-api"),
 		fga: fga.Config{
 			APIURL:               envOr("OPENFGA_API_URL", "http://localhost:8081"),
@@ -247,7 +293,7 @@ type routerDeps struct {
 	verifier       *tokens.Verifier
 	fga            fgaChecker
 	fgaRaw         *openfgaclient.OpenFgaClient // for tuple writes (POST/DELETE docs)
-	store          *Store
+	store          documentStore
 	requiredAud    string
 	allowedOrigins []string
 }
@@ -370,4 +416,20 @@ func parseLogLevel(v string) slog.Level {
 	default:
 		return slog.LevelInfo
 	}
+}
+
+// redactDSN hides the password in a Postgres connection string for log
+// output. Mirrors the helper in cmd/idp/main.go.
+func redactDSN(dsn string) string {
+	scheme := strings.Index(dsn, "://")
+	at := strings.Index(dsn, "@")
+	if scheme < 0 || at < 0 || at <= scheme+3 {
+		return dsn
+	}
+	userinfo := dsn[scheme+3 : at]
+	colon := strings.Index(userinfo, ":")
+	if colon < 0 {
+		return dsn
+	}
+	return dsn[:scheme+3] + userinfo[:colon] + ":***" + dsn[at:]
 }

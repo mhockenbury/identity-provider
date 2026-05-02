@@ -593,10 +593,35 @@ func runUsers(args []string) error {
 }
 
 func runUsersCreate(ctx context.Context, store *users.PostgresStore, args []string) error {
-	if len(args) < 2 {
-		return usageErr("users create: need <email> <password>")
+	// Optional `--id <uuid>` flag for fixed-UUID provisioning (dev seed
+	// scripts, integration tests). Positional args are <email> <password>.
+	var fixedID uuid.UUID
+	positional := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--id" && i+1 < len(args) {
+			id, err := uuid.Parse(args[i+1])
+			if err != nil {
+				return fmt.Errorf("--id: invalid UUID: %w", err)
+			}
+			fixedID = id
+			i++
+			continue
+		}
+		positional = append(positional, args[i])
 	}
-	u, err := store.Create(ctx, args[0], args[1])
+	if len(positional) < 2 {
+		return usageErr("users create: need <email> <password> [--id <uuid>]")
+	}
+
+	var (
+		u   users.User
+		err error
+	)
+	if fixedID != uuid.Nil {
+		u, err = store.CreateWithID(ctx, fixedID, positional[0], positional[1])
+	} else {
+		u, err = store.Create(ctx, positional[0], positional[1])
+	}
 	if err != nil {
 		return fmt.Errorf("create: %w", err)
 	}
@@ -1199,7 +1224,9 @@ Subcommands:
   keys list                         show all signing keys with status + age
   keys activate <kid>               PENDING -> ACTIVE (at most one active)
   keys retire <kid>                 ACTIVE  -> RETIRED
-  users create <email> <password>   create a user (argon2id-hashed)
+  users create <email> <password> [--id <uuid>]
+                                    create a user (argon2id-hashed); --id pins the UUID
+                                    for dev seed / integration test usage
   users list                        show all users (with admin flag)
   users promote <email>             set is_admin=true (gates the 'admin' scope)
   users demote <email>              set is_admin=false

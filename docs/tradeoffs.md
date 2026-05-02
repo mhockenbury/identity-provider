@@ -183,6 +183,21 @@ This replaces an earlier lab shortcut where the IdP issued
 collapsed two distinct identities (client and resource) into one and
 made multi-client deployments structurally awkward.
 
+### docs-api persistence: sqlc + goose, not an ORM
+- **Chose:** [sqlc](https://sqlc.dev) (SQL→typed Go) + [goose](https://pressly.github.io/goose/) (schema migrations).
+- **Rejected:** GORM (Django/ActiveRecord-shaped), ent (schema-as-code), hand-written `pgx` (what the IdP uses).
+- **Why sqlc:** the modern Go default — write SQL, get type-safe Go without runtime reflection or query-builder opacity. Compile-time fail when a query references a column the schema doesn't have. Same SQL discipline as the IdP, plus generated boilerplate.
+- **Why not GORM:** auto-migrate from struct tags is unsafe in prod (can drop columns without review); query opacity makes debugging harder; widely-cited regret at scale. Defensible for fast lab iteration but trains a Django-shaped reflex that doesn't generalize in Go.
+- **Why not ent:** schema-as-code is a different mental model from the IdP's hand-written SQL; would split the project across two paradigms. Worth revisiting if a future subproject is graph-heavy.
+- **Why not pgx-only:** docs-api will accumulate fields/queries faster than the IdP (it's the iteration playground); sqlc's generated boilerplate trades 30 lines of Scan loops for 3 lines of SQL. Consistent persistence in IdP-land via raw pgx + sqlc-generated code in docs-land is acceptable noise.
+- **Schema evolution flow:** add migration → add/edit query in `queries.sql` → `sqlc generate` → wire into `corpus.go` adapter. If you forget the generate step, the build fails with a "method on Queries not found" — design intent.
+
+### Service-owned Postgres (`postgres-docs`)
+- **Chose:** docs-api gets its own Postgres container (`postgres-docs` on host 5435).
+- **Rejected:** sharing `postgres-idp` with a `docs` schema.
+- **Why:** mirrors realistic deployment shape. I4/I5 will eventually want true service ownership, and the wiring is in place. Lab cost is one extra compose service.
+- **Counterpoint worth noting:** in production, many orgs *consolidate* Postgres clusters with strong schema boundaries to cut operational overhead. The "service per DB cluster" purity isn't unconditionally right — it's right *when* services have meaningfully different scale/compliance needs. For a lab, the pedagogical clarity of separate clusters wins.
+
 ## Pending / to be decided later
 
 ### Outbox worker `LISTEN/NOTIFY`
