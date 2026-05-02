@@ -120,6 +120,9 @@ DEV_CLIENT_ID     := localdev
 # don't drift across `make dev-reset`. Production user creation does
 # not pin UUIDs — only this dev seed path uses --id.
 DEV_USER_ID       := aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa
+DEV_ADMIN_EMAIL    := admin-alice@example.com
+DEV_ADMIN_PASSWORD := correct-horse-battery-staple
+DEV_ADMIN_ID       := bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb
 # IDs from cmd/docs-api/migrations/0002_seed.sql (and seed_ids.go).
 DEV_FOLDER_PUBLIC      := 11111111-1111-1111-1111-000000000003
 DEV_FOLDER_ENGINEERING := 11111111-1111-1111-1111-000000000001
@@ -184,6 +187,19 @@ dev-user: build check-deps-idp
 		./bin/idp users create "$(DEV_USER_EMAIL)" "$(DEV_USER_PASSWORD)" --id "$(DEV_USER_ID)"; \
 	} || { echo "ERROR: make sure $(DEV_ENV_FILE) exists (run: make dev-secrets)"; exit 1; }
 
+# Create the admin dev user and promote to is_admin=true. Mirrors dev-user
+# (pinned UUID, idempotent) so the admin SPA at /admin has a known login
+# without hand-running `idp users promote` after every dev-reset.
+dev-admin: build check-deps-idp
+	@. "$(DEV_ENV_FILE)" 2>/dev/null && { \
+		if ! ./bin/idp users list 2>/dev/null | grep -q "$(DEV_ADMIN_EMAIL)"; then \
+			./bin/idp users create "$(DEV_ADMIN_EMAIL)" "$(DEV_ADMIN_PASSWORD)" --id "$(DEV_ADMIN_ID)"; \
+		else \
+			echo "user $(DEV_ADMIN_EMAIL) already exists"; \
+		fi; \
+		./bin/idp users promote "$(DEV_ADMIN_EMAIL)"; \
+	} || { echo "ERROR: make sure $(DEV_ENV_FILE) exists (run: make dev-secrets)"; exit 1; }
+
 # Initialize OpenFGA store + authorization model. Idempotent: if
 # OPENFGA_STORE_ID is already in the env file, skip. Otherwise run
 # `idp fga init` and append the printed lines (with `export ` prefix
@@ -218,11 +234,13 @@ dev-grant: build
 #
 # migrate-docs runs before dev-grant so the seeded folder/document IDs
 # the grants reference actually exist in postgres-docs.
-dev-all: dev-secrets dev-reset dev-key dev-user dev-fga migrate-docs dev-grant
+dev-all: dev-secrets dev-reset dev-key dev-user dev-admin dev-fga migrate-docs dev-grant
 	@echo
 	@echo "=== dev environment ready ==="
 	@echo "  user:     $(DEV_USER_EMAIL)"
 	@echo "  password: $(DEV_USER_PASSWORD)"
+	@echo "  admin:    $(DEV_ADMIN_EMAIL)"
+	@echo "  password: $(DEV_ADMIN_PASSWORD)"
 	@echo "  client:   $(DEV_CLIENT_ID)"
 	@echo
 	@echo "next: make dev-up      (background all 3 Go services + Vite)"
