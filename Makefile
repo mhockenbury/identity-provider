@@ -230,16 +230,20 @@ dev-up: build dev-secrets dev-fga dev-seed-alice
 		$(MAKE) web-install; \
 	fi
 	@echo "==> starting backgrounded services (logs in $(DEV_LOG_DIR)/idp-*.log)"
-	@. "$(DEV_ENV_FILE)" && LOG_FORMAT=pretty nohup ./bin/idp serve > $(DEV_LOG_DIR)/idp-idp.log 2>&1 & echo $$! > $(DEV_LOG_DIR)/idp-idp.pid
-	@. "$(DEV_ENV_FILE)" && LOG_FORMAT=pretty nohup ./bin/outbox-worker > $(DEV_LOG_DIR)/idp-outbox.log 2>&1 & echo $$! > $(DEV_LOG_DIR)/idp-outbox.pid
+	@# Each service launched via `setsid` so the recorded PID is also a
+	@# process-group leader. `dev-down` then signals the whole group,
+	@# which catches Vite's child processes (esbuild workers, the real
+	@# vite binary spawned by `npm run dev`) that would otherwise orphan.
+	@. "$(DEV_ENV_FILE)" && LOG_FORMAT=pretty setsid ./bin/idp serve > $(DEV_LOG_DIR)/idp-idp.log 2>&1 < /dev/null & echo $$! > $(DEV_LOG_DIR)/idp-idp.pid
+	@. "$(DEV_ENV_FILE)" && LOG_FORMAT=pretty setsid ./bin/outbox-worker > $(DEV_LOG_DIR)/idp-outbox.log 2>&1 < /dev/null & echo $$! > $(DEV_LOG_DIR)/idp-outbox.pid
 	@. "$(DEV_ENV_FILE)" && \
 		TRUSTED_ISSUERS=http://localhost:8080 \
 		REQUIRED_AUD=docs-api \
 		ALLOWED_ORIGINS=http://localhost:5173 \
 		LOG_FORMAT=pretty \
-		nohup ./bin/docs-api > $(DEV_LOG_DIR)/idp-docs.log 2>&1 & \
+		setsid ./bin/docs-api > $(DEV_LOG_DIR)/idp-docs.log 2>&1 < /dev/null & \
 		echo $$! > $(DEV_LOG_DIR)/idp-docs.pid
-	@cd web && nohup npm run dev > $(DEV_LOG_DIR)/idp-web.log 2>&1 & echo $$! > $(DEV_LOG_DIR)/idp-web.pid
+	@cd web && setsid npm run dev > $(DEV_LOG_DIR)/idp-web.log 2>&1 < /dev/null & echo $$! > $(DEV_LOG_DIR)/idp-web.pid
 	@sleep 1
 	@echo
 	@echo "=== services ==="
@@ -256,26 +260,42 @@ dev-up: build dev-secrets dev-fga dev-seed-alice
 	@echo "  make dev-down     — stop everything"
 
 dev-down:
+	@# Recorded PID is also the process-group leader (we used setsid in
+	@# dev-up). Two-phase kill: SIGTERM the whole group for graceful
+	@# shutdown, sleep a beat, then SIGKILL anything still alive. The
+	@# kill-the-group form (-pgid) catches Vite's `node vite` child even
+	@# when the npm wrapper exits before forwarding signals.
+	@# Enumerate all members of each process group BEFORE signaling. Once
+	@# the group leader exits (npm in particular exits quickly on SIGTERM),
+	@# Linux stops accepting `kill -- -pgid` even if other members of the
+	@# group are still alive. So: list members via `pgrep -g`, then send
+	@# the signal directly to each PID.
 	@for pidfile in $(DEV_PIDS); do \
 		if [ -f "$$pidfile" ]; then \
-			pid=$$(cat "$$pidfile"); \
-			if kill -0 "$$pid" 2>/dev/null; then \
-				echo "stopping $$pidfile (pid $$pid)"; \
-				kill "$$pid" 2>/dev/null || true; \
+			p=$$(cat "$$pidfile"); \
+			if kill -0 "$$p" 2>/dev/null; then \
+				members=$$(pgrep -g "$$p" 2>/dev/null | tr '\n' ' '); \
+				echo "stopping $$pidfile (pgid $$p, members: $$members)"; \
+				echo "$$members" | xargs -r kill -TERM 2>/dev/null || :; \
 			fi; \
 			rm -f "$$pidfile"; \
 		fi; \
 	done
-	@# Belt-and-suspenders: catch processes whose PID file got out of
-	@# sync (e.g. from a half-failed dev-up). pgrep is exact-match on
-	@# the basename, which won't match the make/sh wrapper processes.
+	@# Belt-and-suspenders: catch Go binaries whose PID file got out of
+	@# sync (e.g. from a half-failed dev-up). pgrep -x is exact-match
+	@# on the basename, so this won't match make/sh wrapper processes.
+	@# We don't auto-clean orphan vite here because the obvious argv
+	@# pattern (node + path-to-vite) also matches make's own recipe
+	@# shell. If vite ever survives despite the group-kill above, run
+	@# `pkill -f node.*/web/node_modules/.bin/vite` from a real shell.
 	@for binname in idp outbox-worker docs-api; do \
 		pids=$$(pgrep -x "$$binname" 2>/dev/null || true); \
 		if [ -n "$$pids" ]; then \
 			echo "stopping orphan $$binname (pids $$pids)"; \
-			kill $$pids 2>/dev/null || true; \
+			kill $$pids 2>/dev/null || :; \
 		fi; \
 	done
+	@:
 
 dev-status:
 	@for pidfile in $(DEV_PIDS); do \
