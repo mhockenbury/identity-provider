@@ -115,13 +115,45 @@ again → invalidates R2 as well; any access token issued from R2 is
 implicitly "poisoned" (we don't revoke JWTs — but the user is forced to
 reauthenticate since no refresh works).
 
+### Token introspection (RFC 7662)
+Stretch. Adds `POST /introspect` returning `{active, sub, aud, scope, exp, ...}`
+for a presented token. The motivation is to feel why JWT-validating
+resource servers *don't* need this and what changes if you switch to
+opaque tokens — introspection requires the caller to authenticate, which
+is the cleanest reason to register a confidential client (e.g.
+`docs-api-introspector`). Sets up the broader point that resource servers
+become OAuth clients the moment they make authenticated outbound calls.
+
+**Verified by:** docs-api flips to opaque-token mode behind a flag, calls
+`/introspect` with `client_secret_basic`, and rejects unknown/expired
+tokens. Cache hit/miss visible in logs to show the latency tradeoff vs
+local JWKS validation.
+
+### Service-to-service via `client_credentials`
+Stretch. Adds `grant_type=client_credentials` to `/token`. The use case:
+a backend (e.g. an indexing job in docs-api, or outbox-worker calling a
+hypothetical search-api) needs to call another service with no user in
+the loop. The caller is a confidential client with no `sub` — the token's
+subject *is* the client. Forces the discussion of how `aud`, scopes, and
+FGA tuples differ when the principal is a service rather than a user.
+
+**Verified by:** a small `cmd/indexer` (or outbox-worker extension) that
+authenticates with `client_secret_basic`, receives a service token scoped
+to a specific resource, and calls docs-api on its own behalf. Test asserts
+docs-api distinguishes service-principal tokens from user tokens.
+
 ### Token exchange (RFC 8693)
 Stretch. Adds `grant_type=urn:ietf:params:oauth:grant-type:token-exchange`
-to `/token`. Lets a service downscope an incoming token for a further
-downstream call (`aud` change, scope subset).
+to `/token`. Lets a service downscope an incoming user token for a further
+downstream call (`aud` change, scope subset) — the on-behalf-of pattern.
+Distinct from `client_credentials` above: that one acts as the service
+itself; this one acts as the user but through the service. Both require
+the caller to be a confidential client.
 
 **Verified by:** docs-api exchanges its incoming token for a scope-reduced
-one before calling a hypothetical second downstream service.
+one before calling a hypothetical second downstream service. Test confirms
+the new token's `aud` is the downstream service and its scopes are a strict
+subset of the original.
 
 ### Dynamic client registration (RFC 7591)
 Likely skipped. Admin UI would fit better first.
