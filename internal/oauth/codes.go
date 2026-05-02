@@ -47,6 +47,7 @@ type AuthCode struct {
 	CodeChallenge       string // PKCE S256 hash, base64url
 	CodeChallengeMethod string // "S256" — we only accept this
 	Scopes              []string
+	Resource            string // RFC 8707; access token's `aud` is set from this at /token
 	Nonce               string
 	ExpiresAt           time.Time
 	UsedAt              *time.Time
@@ -62,6 +63,7 @@ type NewAuthCodeInput struct {
 	CodeChallenge       string
 	CodeChallengeMethod string
 	Scopes              []string
+	Resource            string
 	Nonce               string
 }
 
@@ -122,15 +124,15 @@ func (s *PostgresAuthCodeStore) Issue(ctx context.Context, in NewAuthCodeInput, 
 	const q = `
         INSERT INTO authorization_codes
             (code, client_id, user_id, redirect_uri, code_challenge,
-             code_challenge_method, scopes, nonce, expires_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, NULLIF($8, ''), now() + $9::interval)`
+             code_challenge_method, scopes, resource, nonce, expires_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULLIF($9, ''), now() + $10::interval)`
 
 	intervalSpec := fmt.Sprintf("%d milliseconds", ttl.Milliseconds())
 
 	_, err = s.pool.Exec(ctx, q,
 		code, in.ClientID, in.UserID, in.RedirectURI,
 		in.CodeChallenge, in.CodeChallengeMethod,
-		in.Scopes, in.Nonce, intervalSpec)
+		in.Scopes, in.Resource, in.Nonce, intervalSpec)
 	if err != nil {
 		return "", fmt.Errorf("insert auth code: %w", err)
 	}
@@ -193,7 +195,7 @@ func (s *PostgresAuthCodeStore) Consume(ctx context.Context, code, clientID, red
 func (s *PostgresAuthCodeStore) get(ctx context.Context, code string) (AuthCode, error) {
 	const q = `
         SELECT code, client_id, user_id, redirect_uri, code_challenge,
-               code_challenge_method, scopes, COALESCE(nonce, ''),
+               code_challenge_method, scopes, resource, COALESCE(nonce, ''),
                expires_at, used_at, created_at
         FROM authorization_codes
         WHERE code = $1`
@@ -201,8 +203,8 @@ func (s *PostgresAuthCodeStore) get(ctx context.Context, code string) (AuthCode,
 	var row AuthCode
 	err := s.pool.QueryRow(ctx, q, code).Scan(
 		&row.Code, &row.ClientID, &row.UserID, &row.RedirectURI,
-		&row.CodeChallenge, &row.CodeChallengeMethod, &row.Scopes, &row.Nonce,
-		&row.ExpiresAt, &row.UsedAt, &row.CreatedAt)
+		&row.CodeChallenge, &row.CodeChallengeMethod, &row.Scopes,
+		&row.Resource, &row.Nonce, &row.ExpiresAt, &row.UsedAt, &row.CreatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return AuthCode{}, ErrCodeNotFound

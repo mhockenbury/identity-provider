@@ -60,7 +60,7 @@ resolvePermission (handlers.go)
 Env config:
 - `TRUSTED_ISSUERS` — comma-separated; each gets its own JWKS cache. Multi-issuer lesson lives here.
 - `OPENFGA_API_URL`, `OPENFGA_STORE_ID`, `OPENFGA_AUTHORIZATION_MODEL_ID` — printed by `idp fga init`.
-- `REQUIRED_AUD` — lab shortcut: IdP issues `aud=<client_id>`, so set to the client id (e.g. `localdev`). Production would use RFC 8707 resource indicators.
+- `REQUIRED_AUD` — the resource server's identity (e.g. `docs-api`). Per RFC 8707, the access token's `aud` claim identifies the *resource server*, not the OAuth client. The SPA passes `resource=docs-api` at `/authorize`; the IdP stamps that into `aud`; docs-api requires the match.
 - `ALLOWED_ORIGINS` — CORS for direct-origin testing (dev proxy makes this optional).
 - `DOCS_SEED_{ALICE,BOB,CAROL}` — user UUIDs to bake into the seeded FGA tuples; the corpus has deterministic IDs but the *people* come from the running IdP.
 
@@ -115,15 +115,17 @@ We use `Write` (worker) and `Check` (docs-api + admin handlers). `Expand` / `Bat
 | `code_challenge` | SHA-256(code_verifier) | stored, checked at /token |
 | `code_challenge_method` | `S256` only | reject `plain` |
 | `nonce` | ID token replay mitigation | echoed in ID token |
+| `resource` | RFC 8707 — resource server identity | becomes the access token's `aud` |
 
 ### /authorize validation
 
 1. Client exists; `response_type=code` is in `allowed_grants`
 2. `redirect_uri` exact-match against client's allowlist
-3. `scope` ⊆ `allowed_scopes`
-4. `code_challenge_method=S256`
-5. User logged in (else /login)
-6. Consent present for these scopes (else /consent)
+3. `scope` ⊆ `allowed_scopes` (and non-empty — explicit-scope required)
+4. `resource` ∈ `client.resources` (and non-empty — explicit-resource required, RFC 8707)
+5. `code_challenge_method=S256`
+6. User logged in (else /login)
+7. Consent present for these scopes (else /consent)
 
 ### /token
 
@@ -131,9 +133,9 @@ We use `Write` (worker) and `Check` (docs-api + admin handlers). `Expand` / `Bat
 2. Look up auth code; reject if expired or `used_at IS NOT NULL`
 3. SHA-256(code_verifier) const-time compare to stored challenge
 4. `UPDATE auth_codes SET used_at=now() WHERE used_at IS NULL` — single-row mutex
-5. Issue access JWT (sub, aud, exp, iat, jti, scope, iss)
-6. Issue ID JWT (+ nonce, auth_time, user claims)
-7. Insert refresh token row
+5. Issue access JWT — `aud=<resource>` (from auth code), `sub`, `exp`, `iat`, `jti`, `scope`, `iss`, `client_id`
+6. Issue ID JWT — `aud=<client_id>` (per OIDC Core; ID tokens are *for* the client to consume), `nonce`, `auth_time`, user claims
+7. Insert refresh token row (carries the resource so rotation issues access tokens with the same `aud`)
 
 ### /token (refresh)
 

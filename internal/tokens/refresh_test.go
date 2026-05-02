@@ -49,7 +49,7 @@ func TestRefresh_IssueAndInspect(t *testing.T) {
 	store := tokens.NewPostgresRefreshTokenStore(pool)
 	userID, clientID := seedUserAndClient(t, pool)
 
-	plaintext, row, err := store.Issue(context.Background(), userID, clientID, []string{"openid", "read:docs"}, 30*24*time.Hour)
+	plaintext, row, err := store.Issue(context.Background(), userID, clientID, []string{"openid", "read:docs"}, "docs-api", 30*24*time.Hour)
 	if err != nil {
 		t.Fatalf("Issue: %v", err)
 	}
@@ -83,7 +83,7 @@ func TestRefresh_Rotate_HappyPath(t *testing.T) {
 	store := tokens.NewPostgresRefreshTokenStore(pool)
 	userID, clientID := seedUserAndClient(t, pool)
 
-	orig, _, err := store.Issue(context.Background(), userID, clientID, []string{"openid"}, 30*24*time.Hour)
+	orig, _, err := store.Issue(context.Background(), userID, clientID, []string{"openid"}, "docs-api", 30*24*time.Hour)
 	if err != nil {
 		t.Fatalf("Issue: %v", err)
 	}
@@ -110,7 +110,7 @@ func TestRefresh_Rotate_OldTokenRevoked(t *testing.T) {
 	store := tokens.NewPostgresRefreshTokenStore(pool)
 	userID, clientID := seedUserAndClient(t, pool)
 
-	orig, _, _ := store.Issue(context.Background(), userID, clientID, []string{"openid"}, 30*24*time.Hour)
+	orig, _, _ := store.Issue(context.Background(), userID, clientID, []string{"openid"}, "docs-api", 30*24*time.Hour)
 	_, _, err := store.Rotate(context.Background(), orig, clientID, nil, 30*24*time.Hour)
 	if err != nil {
 		t.Fatalf("first Rotate: %v", err)
@@ -139,7 +139,7 @@ func TestRefresh_Rotate_WrongClientRejected(t *testing.T) {
 	store := tokens.NewPostgresRefreshTokenStore(pool)
 	userID, clientID := seedUserAndClient(t, pool)
 
-	orig, _, _ := store.Issue(context.Background(), userID, clientID, []string{"openid"}, 30*24*time.Hour)
+	orig, _, _ := store.Issue(context.Background(), userID, clientID, []string{"openid"}, "docs-api", 30*24*time.Hour)
 
 	_, _, err := store.Rotate(context.Background(), orig, "some-other-client", nil, 30*24*time.Hour)
 	if !errors.Is(err, tokens.ErrRefreshRevoked) {
@@ -152,7 +152,7 @@ func TestRefresh_Rotate_ExpiredRejected(t *testing.T) {
 	store := tokens.NewPostgresRefreshTokenStore(pool)
 	userID, clientID := seedUserAndClient(t, pool)
 
-	orig, _, _ := store.Issue(context.Background(), userID, clientID, []string{"openid"}, time.Millisecond)
+	orig, _, _ := store.Issue(context.Background(), userID, clientID, []string{"openid"}, "docs-api", time.Millisecond)
 	time.Sleep(10 * time.Millisecond)
 
 	_, _, err := store.Rotate(context.Background(), orig, clientID, nil, 30*24*time.Hour)
@@ -170,7 +170,7 @@ func TestRefresh_Rotate_ScopeSubsetAllowed(t *testing.T) {
 	userID, clientID := seedUserAndClient(t, pool)
 
 	orig, _, _ := store.Issue(context.Background(), userID, clientID,
-		[]string{"openid", "read:docs", "write:docs"}, 30*24*time.Hour)
+		[]string{"openid", "read:docs", "write:docs"}, "docs-api", 30*24*time.Hour)
 
 	_, row, err := store.Rotate(context.Background(), orig, clientID,
 		[]string{"openid", "read:docs"}, 30*24*time.Hour)
@@ -188,7 +188,7 @@ func TestRefresh_Rotate_ScopeUpgradeRejected(t *testing.T) {
 	userID, clientID := seedUserAndClient(t, pool)
 
 	orig, _, _ := store.Issue(context.Background(), userID, clientID,
-		[]string{"openid"}, 30*24*time.Hour)
+		[]string{"openid"}, "docs-api", 30*24*time.Hour)
 
 	// Try to upgrade to include write:docs — not in the original grant.
 	_, _, err := store.Rotate(context.Background(), orig, clientID,
@@ -205,7 +205,7 @@ func TestRefresh_Rotate_ConcurrentSerializes(t *testing.T) {
 	store := tokens.NewPostgresRefreshTokenStore(pool)
 	userID, clientID := seedUserAndClient(t, pool)
 
-	orig, _, _ := store.Issue(context.Background(), userID, clientID, []string{"openid"}, 30*24*time.Hour)
+	orig, _, _ := store.Issue(context.Background(), userID, clientID, []string{"openid"}, "docs-api", 30*24*time.Hour)
 
 	const N = 8
 	results := make(chan error, N)

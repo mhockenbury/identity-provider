@@ -90,6 +90,7 @@ func Authorize(cfg AuthorizeConfig) http.HandlerFunc {
 		codeChallenge := q.Get("code_challenge")
 		codeChallengeMethod := q.Get("code_challenge_method")
 		nonce := q.Get("nonce")
+		resource := q.Get("resource") // RFC 8707 — single value (we don't support multi-resource per token)
 
 		if responseType != "code" {
 			redirectError(w, r, redirectURI, state, "unsupported_response_type", "only response_type=code is supported")
@@ -109,8 +110,27 @@ func Authorize(cfg AuthorizeConfig) http.HandlerFunc {
 		}
 
 		scopes := strings.Fields(scopeRaw)
+		// Explicit scope is required. The SPA owns its own scope list;
+		// the IdP doesn't fall back to anything. Forces every /authorize
+		// URL to declare what it's asking for, which keeps audit logs honest.
+		if len(scopes) == 0 {
+			redirectError(w, r, redirectURI, state, "invalid_scope", "scope is required")
+			return
+		}
 		if err := client.CheckScopes(scopes); err != nil {
 			redirectError(w, r, redirectURI, state, "invalid_scope", err.Error())
+			return
+		}
+
+		// RFC 8707: `resource` is required (we mandate it so the access
+		// token's `aud` is always meaningful). Must be in the client's
+		// registered Resources allowlist.
+		if resource == "" {
+			redirectError(w, r, redirectURI, state, "invalid_request", "resource is required (RFC 8707)")
+			return
+		}
+		if err := client.CheckResource(resource); err != nil {
+			redirectError(w, r, redirectURI, state, "invalid_target", err.Error())
 			return
 		}
 
@@ -144,6 +164,7 @@ func Authorize(cfg AuthorizeConfig) http.HandlerFunc {
 			CodeChallenge:       codeChallenge,
 			CodeChallengeMethod: codeChallengeMethod,
 			Scopes:              scopes,
+			Resource:            resource,
 			Nonce:               nonce,
 		}, cfg.CodeTTL)
 		if err != nil {

@@ -26,11 +26,13 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 IDP_URL="http://localhost:8080"
 DOCS_URL="http://localhost:8083"
 
-# The IdP sets aud=<client_id> on issued tokens, not aud=<resource-server>.
-# docs-api's REQUIRED_AUD must match. This is a lab-scale shortcut —
-# production IdPs usually issue per-resource audiences.
+# RFC 8707 audience semantics: the access token's `aud` claim identifies
+# the *resource server*, not the OAuth client. The SPA passes
+# `resource=docs-api` at /authorize; the IdP stamps that into `aud`;
+# docs-api's REQUIRED_AUD must match.
 CLIENT_ID="localdev"
-REQUIRED_AUD="$CLIENT_ID"
+RESOURCE="docs-api"
+REQUIRED_AUD="$RESOURCE"
 
 ALICE_EMAIL="smoke-alice@example.com"
 
@@ -129,6 +131,7 @@ REDIRECT="http://localhost:5173/callback"
 AUTHZ_URL="${IDP_URL}/authorize?response_type=code&client_id=${CLIENT_ID}"
 AUTHZ_URL+="&redirect_uri=$(printf '%s' "$REDIRECT" | jq -sRr '@uri')"
 AUTHZ_URL+="&scope=$(printf '%s' "openid email read:docs write:docs" | jq -sRr '@uri')"
+AUTHZ_URL+="&resource=$(printf '%s' "$RESOURCE" | jq -sRr '@uri')"
 AUTHZ_URL+="&state=${STATE}"
 AUTHZ_URL+="&code_challenge=${CHALLENGE}"
 AUTHZ_URL+="&code_challenge_method=S256"

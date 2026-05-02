@@ -778,24 +778,34 @@ func runServe() error {
 	}
 
 	// /userinfo: verify tokens against our own key store directly (no
-	// round-trip through our public JWKS endpoint). Pass audience="" so
-	// the verifier accepts tokens issued to any client.
+	// round-trip through our public JWKS endpoint). Audience check is
+	// deliberately disabled here — per OIDC Core the userinfo endpoint
+	// validates iss + signature + openid scope, not aud (the token's aud
+	// belongs to the *resource server* it was minted for, but /userinfo
+	// is a special case the IdP serves on behalf of any of them). Auth0,
+	// Okta, and Google behave the same way.
 	selfResolver := tokens.NewKeyStoreResolver(keyStore)
-	selfVerifier := tokens.NewVerifier(
+	userInfoVerifier := tokens.NewVerifier(
 		map[string]tokens.KeyResolver{cfg.issuerURL: selfResolver},
-		"", // any audience
+		"", // any audience — see note above
 		nil,
 	)
 	userInfoCfg := oidc.UserInfoConfig{
-		Verifier:  selfVerifier,
+		Verifier:  userInfoVerifier,
 		UserStore: &userInfoOIDCAdapter{store: userStore},
 	}
 
-	// Stretch: admin JSON API. Reuses the IdP's own self-verifier — the
-	// admin tokens are issued by this IdP and verified locally, no JWKS
-	// HTTP call. Auth middleware checks scope=admin AND is_admin=true
-	// (defense-in-depth against post-issue demotion).
-	adminAPIHandler := admin.Authenticate(selfVerifier, userStore)(
+	// Admin JSON API: tokens for the admin surface must have aud=idp-admin
+	// (RFC 8707 audience-of-the-resource-server). The SPA sets this via
+	// `resource=idp-admin` at /authorize. This is a separate verifier
+	// because /userinfo's audience semantics differ.
+	const adminAud = "idp-admin"
+	adminVerifier := tokens.NewVerifier(
+		map[string]tokens.KeyResolver{cfg.issuerURL: selfResolver},
+		adminAud,
+		nil,
+	)
+	adminAPIHandler := admin.Authenticate(adminVerifier, userStore)(
 		admin.Handler(admin.Deps{
 			Pool:    pool,
 			Users:   userStore,

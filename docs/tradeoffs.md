@@ -149,12 +149,39 @@ against the client's `redirect_uris` allowlist instead of a separate
 `post_logout_redirect_uris` field. Production OIDC IdPs maintain the two
 allowlists separately. Documented at `internal/http/logout.go`.
 
-### docs-api `aud=client_id` shortcut
-The IdP issues access tokens with `aud=<client_id>` rather than
-`aud=<resource-server>`. docs-api's `REQUIRED_AUD` must therefore match
-the client id. Production IdPs would issue per-resource audiences via
-RFC 8707 resource indicators. Documented at the SPA's
-`scripts/docs_smoke.sh` and in dev_workflow.md.
+### Resource indicators (RFC 8707) + two-client SPA model
+The IdP issues access tokens with `aud=<resource-server-identity>`, not
+`aud=<client_id>`. `/authorize` requires the `resource=` query param;
+the value must be in the client's registered `resources` allowlist.
+`/token` reads the resource off the auth_code or refresh_token row and
+sets `aud` accordingly. ID tokens still use `aud=<client_id>` per OIDC
+Core (the ID token is *for* the client; the access token is *for* the
+resource server).
+
+The SPA splits across two OAuth clients to match this model:
+- `localdev-docs` (resource=docs-api, scopes openid+email+read:docs+write:docs)
+  — used on the docs route tree (`/`, `/docs/*`).
+- `localdev-admin` (resource=idp-admin, scopes openid+email+admin) —
+  used on the admin route tree (`/admin/*`).
+
+Each route tree mounts its own `<AuthProvider>` with namespaced
+sessionStorage prefixes (`oidc.docs:` / `oidc.admin:`) so PKCE
+verifiers + state + nonce don't collide during interleaved logins.
+Different `redirect_uri` per provider (`/callback` vs `/admin/callback`)
+disambiguates which provider completes the post-/authorize redirect.
+
+The third resource server in the IdP process — `/userinfo` — is a
+deliberate exception. Per OIDC Core, the userinfo endpoint validates
+iss + signature + scope=openid; it does NOT enforce a specific `aud`
+because it's served by the issuer itself. Auth0, Okta, and Google all
+behave the same way. So we run two verifiers in the IdP: a strict
+`adminVerifier` (audience=`idp-admin`) for `/admin/api/*` and a
+permissive `userInfoVerifier` (audience=any) for `/userinfo`.
+
+This replaces an earlier lab shortcut where the IdP issued
+`aud=<client_id>` and the resource server matched on that. The shortcut
+collapsed two distinct identities (client and resource) into one and
+made multi-client deployments structurally awkward.
 
 ## Pending / to be decided later
 

@@ -77,9 +77,11 @@ Validates IdP-issued JWTs locally via JWKS HTTP cache; enforces scope + FGA Chec
 
 ### Frontend (`web/`, Vite :5173)
 
-Vite + React + TypeScript SPA, two route trees:
-- `/`, `/docs/*` — docs product UI (folder tree, doc list, permission badges, tier-gated edit/delete)
-- `/admin/{,users,groups,clients,outbox}` — admin UI, scope-gated
+Vite + React + TypeScript SPA, two route trees, each with its own OAuth client + AuthProvider:
+- `/`, `/docs/*` — docs product UI. Client `localdev-docs`, `resource=docs-api`, scopes `openid email read:docs write:docs`. Callback `/callback`.
+- `/admin/{,users,groups,clients,outbox}` — admin UI. Client `localdev-admin`, `resource=idp-admin`, scopes `openid email admin`. Callback `/admin/callback`.
+
+Per-tree `<AuthProvider>` with namespaced sessionStorage prefixes (`oidc.docs:` / `oidc.admin:`) so concurrent PKCE/state/nonce don't collide. Tokens stay in-memory only.
 
 Dev proxy: `/api/docs` → :8083, `/api/admin` → :8080/admin/api.
 
@@ -111,6 +113,7 @@ erDiagram
         text[] redirect_uris
         text[] allowed_grants
         text[] allowed_scopes
+        text[] resources "RFC 8707 — resource servers this client may target"
         boolean is_public "PKCE-only, no secret"
     }
     GROUPS {
@@ -130,6 +133,7 @@ erDiagram
         text code_challenge
         text code_challenge_method
         text[] scopes
+        text resource "RFC 8707; ends up as access token aud"
         timestamptz expires_at
         timestamptz used_at "null until redeemed"
     }
@@ -138,6 +142,7 @@ erDiagram
         uuid user_id FK
         text client_id FK
         text[] scopes
+        text resource "RFC 8707; rotation produces tokens with same aud"
         timestamptz expires_at
         timestamptz revoked_at
         uuid rotated_from "self-ref for rotation chain"
@@ -271,6 +276,7 @@ Smaller decisions in [docs/tradeoffs.md](docs/tradeoffs.md). The big ones:
 - **Refresh-token rotation (Level 2) with 30s reuse-grace, no family-graph yet.** Grace window absorbs the canonical browser-SPA race (StrictMode, tab refocus, network retry). Family-graph reuse detection is a strict-mode upgrade on top, carried forward.
 - **Separate Postgres for IdP and OpenFGA.** Mirrors realistic deployment shape; keeps "who owns which data" honest.
 - **Server-rendered HTML for `/login` + `/consent`, SPA for product surfaces.** Auth pages are protocol; product pages (docs, admin) are UI work where React earns its weight.
+- **RFC 8707 resource indicators + two-client SPA model.** Access tokens carry `aud=<resource-server>` (e.g. `docs-api`, `idp-admin`), not `aud=<client_id>`. The SPA splits across `localdev-docs` and `localdev-admin` to match — each tree mounts its own `<AuthProvider>` with namespaced sessionStorage. ID tokens still use `aud=<client_id>` per OIDC Core. `/userinfo` is a deliberate exception (no aud check) because it's served by the issuer; matches Auth0/Okta/Google.
 
 ## 7. Bottlenecks & Scaling
 
@@ -306,7 +312,7 @@ make run-idp                # :8080
 make run-outbox-worker
 ALICE_SUB=$(docker exec identity-provider-postgres-idp-1 \
     psql -U idp -d idp -tAc "SELECT id FROM users WHERE email='smoke-alice@example.com'")
-TRUSTED_ISSUERS=http://localhost:8080 REQUIRED_AUD=localdev \
+TRUSTED_ISSUERS=http://localhost:8080 REQUIRED_AUD=docs-api \
 DOCS_SEED_ALICE=$ALICE_SUB ALLOWED_ORIGINS=http://localhost:5173 \
     make run-docs-api       # :8083
 
@@ -319,7 +325,9 @@ bash scripts/dev_flow.sh    # protocol regression via curl
 bash scripts/docs_smoke.sh  # full triangle: token → docs-api → FGA Check
 
 # 6. Browser: http://localhost:5173, log in as smoke-alice@example.com /
-#    correct-horse-battery-staple. For admin UI:
+#    correct-horse-battery-staple. Docs UI loads.
+#    For admin UI: visit http://localhost:5173/admin (you'll be prompted
+#    to log in again under the admin client). First time, promote alice:
 go run ./cmd/idp users promote smoke-alice@example.com
 # (sign out and back in to pick up the admin scope)
 ```
@@ -341,7 +349,7 @@ N/A by scope.
 
 **Ratchet for the next subproject:**
 - Skip introspection + dynamic-registration tangents earlier — they're product surface, not protocol learning.
-- Wire the SPA as a smoke target by layer 5, not layer 9. Curl tests are necessary but not sufficient (CORS, `aud=client_id`, consent-form param shape — all only surface from a real browser).
+- Wire the SPA as a smoke target by layer 5, not layer 9. Curl tests are necessary but not sufficient (CORS, audience semantics, consent-form param shape — all only surface from a real browser).
 - The interface-first persistence pattern is the keeper.
 
 **Carry forward:** WebAuthn / passkeys, DPoP, refresh-token family-graph reuse detection, RFC 8693 token exchange, auto signing-key rotation, self-serve user registration.

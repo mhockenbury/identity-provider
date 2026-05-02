@@ -118,9 +118,9 @@ func (s *Signer) sign(ctx context.Context, claims jwt.Claims) (string, error) {
 // public key for a given kid. Multiple issuers supported on purpose:
 // that's the "multi-issuer verification" learning objective.
 type Verifier struct {
-	issuers  map[string]KeyResolver
-	audience string
-	clock    Clock
+	issuers   map[string]KeyResolver
+	audiences []string // empty means audience check is skipped
+	clock     Clock
 }
 
 // KeyResolver answers "what's the public key for this kid?" for a given
@@ -131,17 +131,32 @@ type KeyResolver interface {
 
 // NewVerifier constructs a verifier. issuers is the allowlist — tokens
 // with an `iss` not in this map are rejected. audience, if non-empty,
-// must match the token's `aud` claim.
+// must match the token's `aud` claim. For multi-audience verification
+// (e.g. one resource server accepting tokens issued for several
+// clients), use NewVerifierMultiAud instead.
 func NewVerifier(issuers map[string]KeyResolver, audience string, clock Clock) *Verifier {
+	var auds []string
+	if audience != "" {
+		auds = []string{audience}
+	}
+	return NewVerifierMultiAud(issuers, auds, clock)
+}
+
+// NewVerifierMultiAud is the multi-audience form. The token must have
+// at least one `aud` value present in `audiences`; an empty audiences
+// slice skips the check entirely (don't ship that in production).
+func NewVerifierMultiAud(issuers map[string]KeyResolver, audiences []string, clock Clock) *Verifier {
 	if clock == nil {
 		clock = DefaultClock
 	}
-	// Defensive copy: callers shouldn't mutate our issuer map after the fact.
+	// Defensive copy: callers shouldn't mutate our maps/slices after the fact.
 	cp := make(map[string]KeyResolver, len(issuers))
 	for k, v := range issuers {
 		cp[k] = v
 	}
-	return &Verifier{issuers: cp, audience: audience, clock: clock}
+	auds := make([]string, len(audiences))
+	copy(auds, audiences)
+	return &Verifier{issuers: cp, audiences: auds, clock: clock}
 }
 
 // Verify parses, verifies signature, and validates exp/nbf/iss/aud on a
@@ -200,15 +215,25 @@ func (v *Verifier) resolveKey(ctx context.Context, tok *jwt.Token, claims *Acces
 	}
 
 	// Audience enforcement. RFC 7519 §4.1.3: if aud is present, it MUST
-	// be validated. For now we require it if the verifier is configured
-	// with one; strict-by-default.
-	if v.audience != "" {
-		hasAud, err := claims.HasAudience(v.audience)
-		if err != nil {
-			return nil, fmt.Errorf("%w: aud check: %v", ErrInvalidToken, err)
+	// be validated. We require a match if the verifier is configured
+	// with one or more acceptable audiences. NewVerifier wraps the
+	// single-aud case (the common one); NewVerifierMultiAud is reserved
+	// for resource servers that legitimately host multiple logical
+	// audiences (rare).
+	if len(v.audiences) > 0 {
+		matched := false
+		for _, want := range v.audiences {
+			ok, err := claims.HasAudience(want)
+			if err != nil {
+				return nil, fmt.Errorf("%w: aud check: %v", ErrInvalidToken, err)
+			}
+			if ok {
+				matched = true
+				break
+			}
 		}
-		if !hasAud {
-			return nil, fmt.Errorf("%w: expected %q, got %v", ErrAudienceMissing, v.audience, claims.Audience)
+		if !matched {
+			return nil, fmt.Errorf("%w: expected one of %v, got %v", ErrAudienceMissing, v.audiences, claims.Audience)
 		}
 	}
 

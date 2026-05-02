@@ -46,6 +46,7 @@ type RefreshToken struct {
 	UserID      uuid.UUID
 	ClientID    string
 	Scopes      []string
+	Resource    string // RFC 8707; aud of access tokens minted via this refresh chain
 	ExpiresAt   time.Time
 	RevokedAt   *time.Time
 	RotatedFrom *uuid.UUID
@@ -56,8 +57,9 @@ type RefreshToken struct {
 type RefreshTokenStore interface {
 	// Issue mints a new token, stores its hash + metadata, and returns
 	// BOTH the plaintext token (to include in the /token response) and
-	// the row view. The plaintext cannot be recovered later.
-	Issue(ctx context.Context, userID uuid.UUID, clientID string, scopes []string, ttl time.Duration) (plaintext string, row RefreshToken, err error)
+	// the row view. The plaintext cannot be recovered later. resource is
+	// the RFC 8707 audience this token's chain is bound to.
+	Issue(ctx context.Context, userID uuid.UUID, clientID string, scopes []string, resource string, ttl time.Duration) (plaintext string, row RefreshToken, err error)
 
 	// Rotate consumes an existing refresh token + issues a replacement
 	// atomically. Returns the NEW plaintext + row. The old row is marked
@@ -98,7 +100,7 @@ func hashRefresh(plaintext string) string {
 	return base64.RawURLEncoding.EncodeToString(sum[:])
 }
 
-func (s *PostgresRefreshTokenStore) Issue(ctx context.Context, userID uuid.UUID, clientID string, scopes []string, ttl time.Duration) (string, RefreshToken, error) {
+func (s *PostgresRefreshTokenStore) Issue(ctx context.Context, userID uuid.UUID, clientID string, scopes []string, resource string, ttl time.Duration) (string, RefreshToken, error) {
 	if ttl <= 0 {
 		return "", RefreshToken{}, fmt.Errorf("refresh ttl must be > 0")
 	}
@@ -110,17 +112,17 @@ func (s *PostgresRefreshTokenStore) Issue(ctx context.Context, userID uuid.UUID,
 
 	const q = `
         INSERT INTO refresh_tokens
-            (token_hash, user_id, client_id, scopes, expires_at)
-        VALUES ($1, $2, $3, $4, now() + $5::interval)
-        RETURNING id, user_id, client_id, scopes, expires_at, revoked_at,
+            (token_hash, user_id, client_id, scopes, resource, expires_at)
+        VALUES ($1, $2, $3, $4, $5, now() + $6::interval)
+        RETURNING id, user_id, client_id, scopes, resource, expires_at, revoked_at,
                   rotated_from, created_at`
 
 	intervalSpec := fmt.Sprintf("%d milliseconds", ttl.Milliseconds())
 
 	var row RefreshToken
 	err = s.pool.QueryRow(ctx, q,
-		hashRefresh(plaintext), userID, clientID, scopes, intervalSpec).Scan(
-		&row.ID, &row.UserID, &row.ClientID, &row.Scopes,
+		hashRefresh(plaintext), userID, clientID, scopes, resource, intervalSpec).Scan(
+		&row.ID, &row.UserID, &row.ClientID, &row.Scopes, &row.Resource,
 		&row.ExpiresAt, &row.RevokedAt, &row.RotatedFrom, &row.CreatedAt)
 	if err != nil {
 		return "", RefreshToken{}, fmt.Errorf("insert refresh: %w", err)
@@ -148,7 +150,7 @@ func (s *PostgresRefreshTokenStore) Rotate(ctx context.Context, presentedPlainte
 	defer tx.Rollback(ctx)
 
 	const qOld = `
-        SELECT id, user_id, client_id, scopes, expires_at, revoked_at
+        SELECT id, user_id, client_id, scopes, resource, expires_at, revoked_at
         FROM refresh_tokens
         WHERE token_hash = $1
         FOR UPDATE`
@@ -158,11 +160,12 @@ func (s *PostgresRefreshTokenStore) Rotate(ctx context.Context, presentedPlainte
 		UserID    uuid.UUID
 		ClientID  string
 		Scopes    []string
+		Resource  string
 		ExpiresAt time.Time
 		RevokedAt *time.Time
 	}
 	err = tx.QueryRow(ctx, qOld, hash).Scan(
-		&old.ID, &old.UserID, &old.ClientID, &old.Scopes, &old.ExpiresAt, &old.RevokedAt)
+		&old.ID, &old.UserID, &old.ClientID, &old.Scopes, &old.Resource, &old.ExpiresAt, &old.RevokedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return "", RefreshToken{}, ErrRefreshNotFound
@@ -208,17 +211,17 @@ func (s *PostgresRefreshTokenStore) Rotate(ctx context.Context, presentedPlainte
 	}
 	const qNew = `
         INSERT INTO refresh_tokens
-            (token_hash, user_id, client_id, scopes, expires_at, rotated_from)
-        VALUES ($1, $2, $3, $4, now() + $5::interval, $6)
-        RETURNING id, user_id, client_id, scopes, expires_at, revoked_at,
+            (token_hash, user_id, client_id, scopes, resource, expires_at, rotated_from)
+        VALUES ($1, $2, $3, $4, $5, now() + $6::interval, $7)
+        RETURNING id, user_id, client_id, scopes, resource, expires_at, revoked_at,
                   rotated_from, created_at`
 
 	intervalSpec := fmt.Sprintf("%d milliseconds", ttl.Milliseconds())
 
 	var row RefreshToken
 	err = tx.QueryRow(ctx, qNew,
-		hashRefresh(plaintext), old.UserID, old.ClientID, scopesToStore, intervalSpec, old.ID).Scan(
-		&row.ID, &row.UserID, &row.ClientID, &row.Scopes,
+		hashRefresh(plaintext), old.UserID, old.ClientID, scopesToStore, old.Resource, intervalSpec, old.ID).Scan(
+		&row.ID, &row.UserID, &row.ClientID, &row.Scopes, &row.Resource,
 		&row.ExpiresAt, &row.RevokedAt, &row.RotatedFrom, &row.CreatedAt)
 	if err != nil {
 		return "", RefreshToken{}, fmt.Errorf("insert new refresh: %w", err)

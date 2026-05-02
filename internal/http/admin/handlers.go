@@ -529,6 +529,7 @@ type clientView struct {
 	RedirectURIs  []string `json:"redirect_uris"`
 	AllowedGrants []string `json:"allowed_grants"`
 	AllowedScopes []string `json:"allowed_scopes"`
+	Resources     []string `json:"resources"`
 	CreatedAt     string   `json:"created_at"`
 }
 
@@ -548,6 +549,7 @@ func toClientView(c clients.Client) clientView {
 		RedirectURIs:  c.RedirectURIs,
 		AllowedGrants: c.AllowedGrants,
 		AllowedScopes: c.AllowedScopes,
+		Resources:     c.Resources,
 		CreatedAt:     c.CreatedAt.UTC().Format(isoFormat),
 	}
 }
@@ -591,6 +593,7 @@ func createClient(d Deps) http.HandlerFunc {
 			RedirectURIs  []string `json:"redirect_uris"`
 			AllowedGrants []string `json:"allowed_grants"`
 			AllowedScopes []string `json:"allowed_scopes"`
+			Resources     []string `json:"resources"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeError(w, http.StatusBadRequest, "bad_request", "malformed JSON")
@@ -616,6 +619,7 @@ func createClient(d Deps) http.HandlerFunc {
 			RedirectURIs:  req.RedirectURIs,
 			AllowedGrants: req.AllowedGrants,
 			AllowedScopes: req.AllowedScopes,
+			Resources:     req.Resources,
 		}
 		saved, plaintext, err := d.Clients.Create(r.Context(), c)
 		if err != nil {
@@ -643,6 +647,7 @@ func updateClient(d Deps) http.HandlerFunc {
 			RedirectURIs  []string `json:"redirect_uris"`
 			AllowedGrants []string `json:"allowed_grants"`
 			AllowedScopes []string `json:"allowed_scopes"`
+			Resources     []string `json:"resources"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeError(w, http.StatusBadRequest, "bad_request", "malformed JSON")
@@ -653,7 +658,7 @@ func updateClient(d Deps) http.HandlerFunc {
 			return
 		}
 		updated, err := d.Clients.Update(r.Context(), id,
-			req.RedirectURIs, req.AllowedGrants, req.AllowedScopes)
+			req.RedirectURIs, req.AllowedGrants, req.AllowedScopes, req.Resources)
 		if err != nil {
 			if errors.Is(err, clients.ErrNotFound) {
 				writeError(w, http.StatusNotFound, "not_found", "client not found")

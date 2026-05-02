@@ -64,10 +64,16 @@ type config struct {
 }
 
 func loadConfig() (config, error) {
+	apiURL := os.Getenv("OPENFGA_API_URL")
+	if apiURL == "" {
+		// Match the IdP and docs-api default so all three services
+		// agree on where OpenFGA lives in the standard local-dev setup.
+		apiURL = "http://localhost:8081"
+	}
 	cfg := config{
 		databaseURL: os.Getenv("DATABASE_URL"),
 		fga: fga.Config{
-			APIURL:               os.Getenv("OPENFGA_API_URL"),
+			APIURL:               apiURL,
 			StoreID:              os.Getenv("OPENFGA_STORE_ID"),
 			AuthorizationModelID: os.Getenv("OPENFGA_AUTHORIZATION_MODEL_ID"),
 			APIToken:             os.Getenv("OPENFGA_API_TOKEN"),
@@ -79,9 +85,6 @@ func loadConfig() (config, error) {
 	}
 	if cfg.databaseURL == "" {
 		return cfg, errors.New("DATABASE_URL is required")
-	}
-	if cfg.fga.APIURL == "" {
-		return cfg, errors.New("OPENFGA_API_URL is required")
 	}
 	if cfg.fga.StoreID == "" {
 		return cfg, errors.New("OPENFGA_STORE_ID is required (run `idp fga init`)")

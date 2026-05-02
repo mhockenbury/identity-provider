@@ -75,6 +75,7 @@ func buildTestClient() clients.Client {
 		RedirectURIs:  []string{"http://localhost:5173/callback"},
 		AllowedGrants: []string{"authorization_code", "refresh_token"},
 		AllowedScopes: []string{"openid", "profile", "email", "read:docs"},
+		Resources:     []string{"docs-api"},
 		IsPublic:      true,
 	}
 }
@@ -107,6 +108,7 @@ func goodAuthorizeURL() string {
 	v.Set("client_id", "localdev")
 	v.Set("redirect_uri", "http://localhost:5173/callback")
 	v.Set("scope", "openid read:docs")
+	v.Set("resource", "docs-api")
 	v.Set("state", "xyz")
 	v.Set("code_challenge", "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM")
 	v.Set("code_challenge_method", "S256")

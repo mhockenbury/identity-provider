@@ -177,12 +177,16 @@ func handleAuthCode(w http.ResponseWriter, r *http.Request, cfg TokenConfig, cli
 	}
 
 	// Issue tokens.
+	// Access-token audience is the resource server (RFC 8707), captured
+	// at /authorize and stored on the auth_code row. ID-token audience
+	// is always the client_id per OIDC Core — the ID token is *for* the
+	// client to consume, the access token is *for* the resource server.
 	scope := strings.Join(row.Scopes, " ")
 	accessClaims := tokens.AccessClaims{
 		BaseClaims: tokens.BaseClaims{
 			RegisteredClaims: jwt.RegisteredClaims{
 				Subject:  row.UserID.String(),
-				Audience: jwt.ClaimStrings{client.ID},
+				Audience: jwt.ClaimStrings{row.Resource},
 			},
 		},
 		Scope:    scope,
@@ -195,10 +199,12 @@ func handleAuthCode(w http.ResponseWriter, r *http.Request, cfg TokenConfig, cli
 		return
 	}
 
-	// Refresh token if client is allowed it.
+	// Refresh token if client is allowed it. Resource is captured on the
+	// row so rotation produces tokens with the same `aud` as the
+	// original access token.
 	var refreshPlaintext string
 	if slices.Contains(client.AllowedGrants, "refresh_token") {
-		plaintext, _, err := cfg.RefreshTokens.Issue(r.Context(), row.UserID, client.ID, row.Scopes, cfg.RefreshTokenTTL)
+		plaintext, _, err := cfg.RefreshTokens.Issue(r.Context(), row.UserID, client.ID, row.Scopes, row.Resource, cfg.RefreshTokenTTL)
 		if err != nil {
 			slog.ErrorContext(r.Context(), "token: issue refresh", "err", err)
 			writeOAuthError(w, http.StatusInternalServerError, "server_error", "")
@@ -293,13 +299,15 @@ func handleRefresh(w http.ResponseWriter, r *http.Request, cfg TokenConfig, clie
 		return
 	}
 
-	// Issue fresh access + ID tokens.
+	// Issue fresh access + ID tokens. Access-token aud comes from the
+	// refresh_token row's stored resource (set at /authorize); ID-token
+	// aud is always the client_id.
 	scope := strings.Join(row.Scopes, " ")
 	accessClaims := tokens.AccessClaims{
 		BaseClaims: tokens.BaseClaims{
 			RegisteredClaims: jwt.RegisteredClaims{
 				Subject:  row.UserID.String(),
-				Audience: jwt.ClaimStrings{client.ID},
+				Audience: jwt.ClaimStrings{row.Resource},
 			},
 		},
 		Scope:    scope,

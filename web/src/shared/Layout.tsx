@@ -1,14 +1,20 @@
 // Layout wraps authenticated pages with the top nav. Public pages
 // (landing, callback) render without this wrapper.
+//
+// The "admin" link is always shown — it points to /admin which is served
+// by the admin AuthProvider tree (different OAuth client, different
+// resource audience). Clicking it triggers a fresh login under the
+// admin client; non-admin users get filtered scope at consent time and
+// land back on the docs view. The docs tree's access token never
+// carries admin scope on its own (different client).
 
 import { Link, Outlet } from "react-router-dom";
 import { useAuth } from "react-oidc-context";
-import { useHasScope } from "../auth/useHasScope";
 
 export function Layout() {
   const auth = useAuth();
-  const isAdmin = useHasScope("admin");
   const email = auth.user?.profile.email ?? auth.user?.profile.sub ?? "";
+  const onAdmin = window.location.pathname.startsWith("/admin");
 
   return (
     <div className="flex min-h-full flex-col bg-gray-50 text-gray-900">
@@ -18,12 +24,17 @@ export function Layout() {
             <Link to="/docs" className="font-semibold">
               docs
             </Link>
-            {isAdmin && (
+            {!onAdmin && (
               <Link
                 to="/admin"
                 className="text-sm text-gray-600 hover:text-gray-900"
               >
                 admin
+              </Link>
+            )}
+            {onAdmin && (
+              <Link to="/" className="text-sm text-gray-600 hover:text-gray-900">
+                ← back to docs
               </Link>
             )}
           </div>

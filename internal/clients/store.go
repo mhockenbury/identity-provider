@@ -34,6 +34,7 @@ var (
 	ErrScopeNotAllowed       = errors.New("requested scope exceeds client's allowed scopes")
 	ErrIDTaken               = errors.New("client id already in use")
 	ErrInvalidClientShape    = errors.New("public clients must not have a secret; confidential must")
+	ErrResourceNotAllowed    = errors.New("resource not registered for this client")
 )
 
 // Postgres unique-violation SQLSTATE.
@@ -43,12 +44,18 @@ const pgUniqueViolation = "23505"
 // confidential clients always do.
 type Client struct {
 	ID            string
-	SecretHash    string    // empty for public clients
+	SecretHash    string   // empty for public clients
 	RedirectURIs  []string
 	AllowedGrants []string
 	AllowedScopes []string
-	IsPublic      bool
-	CreatedAt     time.Time
+	// Resources is the RFC 8707 allowlist: which resource servers this
+	// client may request tokens for. /authorize requires `resource=` and
+	// validates membership here. The chosen resource ends up as the
+	// access token's `aud` claim — that's the *resource server's*
+	// identity, not the client's.
+	Resources []string
+	IsPublic  bool
+	CreatedAt time.Time
 }
 
 // Store is the clients package's persistence + policy surface. Handlers
@@ -75,11 +82,11 @@ type Store interface {
 	// Returns ErrIDTaken on unique-constraint conflict.
 	Create(ctx context.Context, c Client) (Client, string, error)
 
-	// Update replaces redirect_uris, allowed_grants, and allowed_scopes.
-	// The id, is_public, and secret_hash are NOT updatable — those have
-	// dedicated paths (RotateSecret, Delete + Create for the others).
+	// Update replaces redirect_uris, allowed_grants, allowed_scopes, and
+	// resources. The id, is_public, and secret_hash are NOT updatable —
+	// those have dedicated paths (RotateSecret, Delete + Create).
 	// Returns ErrNotFound if the client doesn't exist.
-	Update(ctx context.Context, id string, redirectURIs, allowedGrants, allowedScopes []string) (Client, error)
+	Update(ctx context.Context, id string, redirectURIs, allowedGrants, allowedScopes, resources []string) (Client, error)
 
 	// RotateSecret generates a new secret for a confidential client,
 	// hashes + persists it, and returns the plaintext (ONLY time exposed).
@@ -104,14 +111,14 @@ func NewPostgresStore(pool *pgxpool.Pool) *PostgresStore {
 func (s *PostgresStore) GetByID(ctx context.Context, id string) (Client, error) {
 	const q = `
         SELECT id, COALESCE(secret_hash, ''), redirect_uris, allowed_grants,
-               allowed_scopes, is_public, created_at
+               allowed_scopes, resources, is_public, created_at
         FROM clients
         WHERE id = $1`
 
 	var c Client
 	err := s.pool.QueryRow(ctx, q, id).Scan(
 		&c.ID, &c.SecretHash, &c.RedirectURIs, &c.AllowedGrants,
-		&c.AllowedScopes, &c.IsPublic, &c.CreatedAt)
+		&c.AllowedScopes, &c.Resources, &c.IsPublic, &c.CreatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return Client{}, ErrNotFound
@@ -155,7 +162,7 @@ func (s *PostgresStore) Authenticate(ctx context.Context, clientID, presentedSec
 func (s *PostgresStore) List(ctx context.Context) ([]Client, error) {
 	const q = `
         SELECT id, COALESCE(secret_hash, ''), redirect_uris, allowed_grants,
-               allowed_scopes, is_public, created_at
+               allowed_scopes, resources, is_public, created_at
         FROM clients
         ORDER BY created_at`
 	rows, err := s.pool.Query(ctx, q)
@@ -168,7 +175,7 @@ func (s *PostgresStore) List(ctx context.Context) ([]Client, error) {
 	for rows.Next() {
 		var c Client
 		if err := rows.Scan(&c.ID, &c.SecretHash, &c.RedirectURIs, &c.AllowedGrants,
-			&c.AllowedScopes, &c.IsPublic, &c.CreatedAt); err != nil {
+			&c.AllowedScopes, &c.Resources, &c.IsPublic, &c.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan client: %w", err)
 		}
 		out = append(out, c)
@@ -206,16 +213,16 @@ func (s *PostgresStore) Create(ctx context.Context, c Client) (Client, string, e
 
 	const q = `
         INSERT INTO clients (id, secret_hash, redirect_uris, allowed_grants,
-                             allowed_scopes, is_public)
-        VALUES ($1, NULLIF($2, ''), $3, $4, $5, $6)
+                             allowed_scopes, resources, is_public)
+        VALUES ($1, NULLIF($2, ''), $3, $4, $5, $6, $7)
         RETURNING id, COALESCE(secret_hash, ''), redirect_uris, allowed_grants,
-                  allowed_scopes, is_public, created_at`
+                  allowed_scopes, resources, is_public, created_at`
 
 	var saved Client
 	err := s.pool.QueryRow(ctx, q,
-		c.ID, hash, c.RedirectURIs, c.AllowedGrants, c.AllowedScopes, c.IsPublic,
+		c.ID, hash, c.RedirectURIs, c.AllowedGrants, c.AllowedScopes, c.Resources, c.IsPublic,
 	).Scan(&saved.ID, &saved.SecretHash, &saved.RedirectURIs, &saved.AllowedGrants,
-		&saved.AllowedScopes, &saved.IsPublic, &saved.CreatedAt)
+		&saved.AllowedScopes, &saved.Resources, &saved.IsPublic, &saved.CreatedAt)
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == pgUniqueViolation {
@@ -228,20 +235,21 @@ func (s *PostgresStore) Create(ctx context.Context, c Client) (Client, string, e
 
 // Update replaces the editable arrays. id / is_public / secret_hash are
 // out of scope (separate paths or recreate-from-scratch).
-func (s *PostgresStore) Update(ctx context.Context, id string, redirectURIs, allowedGrants, allowedScopes []string) (Client, error) {
+func (s *PostgresStore) Update(ctx context.Context, id string, redirectURIs, allowedGrants, allowedScopes, resources []string) (Client, error) {
 	const q = `
         UPDATE clients
         SET redirect_uris = $2,
             allowed_grants = $3,
-            allowed_scopes = $4
+            allowed_scopes = $4,
+            resources = $5
         WHERE id = $1
         RETURNING id, COALESCE(secret_hash, ''), redirect_uris, allowed_grants,
-                  allowed_scopes, is_public, created_at`
+                  allowed_scopes, resources, is_public, created_at`
 
 	var c Client
-	err := s.pool.QueryRow(ctx, q, id, redirectURIs, allowedGrants, allowedScopes).Scan(
+	err := s.pool.QueryRow(ctx, q, id, redirectURIs, allowedGrants, allowedScopes, resources).Scan(
 		&c.ID, &c.SecretHash, &c.RedirectURIs, &c.AllowedGrants,
-		&c.AllowedScopes, &c.IsPublic, &c.CreatedAt)
+		&c.AllowedScopes, &c.Resources, &c.IsPublic, &c.CreatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return Client{}, ErrNotFound
@@ -280,12 +288,12 @@ func (s *PostgresStore) RotateSecret(ctx context.Context, id string) (Client, st
         SET secret_hash = $2
         WHERE id = $1
         RETURNING id, COALESCE(secret_hash, ''), redirect_uris, allowed_grants,
-                  allowed_scopes, is_public, created_at`
+                  allowed_scopes, resources, is_public, created_at`
 
 	var saved Client
 	err = s.pool.QueryRow(ctx, q, id, hash).Scan(
 		&saved.ID, &saved.SecretHash, &saved.RedirectURIs, &saved.AllowedGrants,
-		&saved.AllowedScopes, &saved.IsPublic, &saved.CreatedAt)
+		&saved.AllowedScopes, &saved.Resources, &saved.IsPublic, &saved.CreatedAt)
 	if err != nil {
 		return Client{}, "", fmt.Errorf("rotate secret: %w", err)
 	}
@@ -347,4 +355,13 @@ func (c Client) CheckScopes(requested []string) error {
 		}
 	}
 	return nil
+}
+
+// CheckResource enforces RFC 8707: the requested `resource` must be in
+// the client's registered Resources allowlist.
+func (c Client) CheckResource(resource string) error {
+	if slices.Contains(c.Resources, resource) {
+		return nil
+	}
+	return fmt.Errorf("%w: %q", ErrResourceNotAllowed, resource)
 }
