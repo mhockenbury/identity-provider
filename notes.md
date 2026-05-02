@@ -3,28 +3,19 @@
 Subproject-local notes: decisions during implementation, commands, references.
 The README is the design doc; this file is the working log.
 
-## Current state (as of layer 7 complete)
+## Current state
 
-Working HTTP surface — all OAuth + OIDC endpoints live:
+All 9 backend layers + both stretch UIs (docs SPA + admin SPA) shipped, plus multiple post-layer-9 architecture refinements:
+- RFC 8707 resource indicators (replaces earlier `aud=client_id` shortcut)
+- Two-client SPA model (`localdev-docs` for `/docs/*`, `localdev-admin` for `/admin/*`)
+- docs-api Postgres persistence via sqlc + goose, in its own `postgres-docs` cluster
+- Service-boundary cleanup: `docs-api grant` CLI replaces in-process `SeedFGA`
+- Stable dev-user UUID via `idp users create --id`
+- Turnkey local dev via `make dev-up` / `make dev-tail` / `make dev-down`
 
-| Endpoint | Status | Layer |
-|----------|--------|-------|
-| `GET /.well-known/openid-configuration` | ✓ | 4 |
-| `GET /.well-known/jwks.json` | ✓ | 4 |
-| `GET /authorize` | ✓ | 5 |
-| `GET + POST /login` | ✓ | 5 |
-| `GET + POST /consent` | ✓ | 5 |
-| `POST /token` (authorization_code + refresh_token grants) | ✓ | 6 |
-| `GET /userinfo` | ✓ | 7 |
-| `GET /healthz` | ✓ | 4 |
+For the canonical story see README. For per-decision rationale see `docs/tradeoffs.md`. For dev workflow specifics see brain `projects/research/sysdesign-lab/identity-provider/dev_workflow.md`.
 
-End-to-end smoke test (`make dev-flow`) exercises all of them in one script:
-GET /authorize → redirect to /login → POST /login → redirect to /consent → POST approve → redirect with code → POST /token → GET /userinfo → bonus refresh rotation.
-
-Pending:
-- **Layer 8** — outbox writer hooks (inside identity-mutation transactions) + `cmd/outbox-worker` draining to OpenFGA. The novel "claims-to-tuples" twist.
-- **Layer 9** — docs-api (separate binary validating JWTs against JWKS, enforcing FGA).
-- **Stretches** — WebAuthn, DPoP, refresh reuse detection, RFC 8693 token exchange, **client-app/SPA integration** (catch-all callback listener or a real oidc-client-ts SPA; currently the browser flow dead-ends at `localhost:5173/callback` with "Unable to connect" because no client exists).
+The sections below are a historical working log: decisions noted during implementation. Kept for the trail; not always reflective of the current state (e.g. early "OpenFGA pinned to v1.9.4" was bumped to v1.14.2 during layer 8c).
 
 ## Decisions (during scaffolding)
 

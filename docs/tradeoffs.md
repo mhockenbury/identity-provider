@@ -198,6 +198,22 @@ made multi-client deployments structurally awkward.
 - **Why:** mirrors realistic deployment shape. I4/I5 will eventually want true service ownership, and the wiring is in place. Lab cost is one extra compose service.
 - **Counterpoint worth noting:** in production, many orgs *consolidate* Postgres clusters with strong schema boundaries to cut operational overhead. The "service per DB cluster" purity isn't unconditionally right — it's right *when* services have meaningfully different scale/compliance needs. For a lab, the pedagogical clarity of separate clusters wins.
 
+### Operator grants live on docs-api, not the IdP
+- **Chose:** `docs-api grant <user-uuid> <role> <resource>` is a docs-api CLI subcommand.
+- **Rejected:** folding it into the IdP CLI as `idp docs grant ...`.
+- **Why:** the vocabulary (owner / editor / viewer on folder / document) is docs-api's. The IdP shouldn't know what a "viewer-on-engineering" means any more than it should know about documents at all. Service boundary stays clean; the seam is the user UUID, which the operator pastes from `idp users list`. The lab cost is one extra step in the operator flow.
+- **Replaces:** an earlier shortcut where docs-api wrote default FGA tuples at startup using `DOCS_SEED_ALICE` env vars. That shortcut crossed the boundary (docs-api had to know about the IdP's user table) and was the source of the alice-UUID-drift bug.
+
+### Stable dev-user UUID (`--id` flag on `idp users create`)
+- **Chose:** `make dev-user` pins alice's UUID to `aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa` via a new `--id` flag on the create CLI.
+- **Rejected:** deterministic UUID from email hash; SQL seed bypassing the CLI.
+- **Why:** seeded FGA tuples reference user UUIDs; if alice's UUID changes after a `dev-reset`, every grant points at a ghost. Pinning fixes the drift without baking dev-only paths into production code. Production `idp users create` (no flag) still uses `gen_random_uuid()`. The CLI flag is also useful for integration tests that want stable references.
+
+### Pretty logs in dev (`LOG_FORMAT=pretty` via tint)
+- **Chose:** `internal/logging` switches between JSON (default) and tint-colored text based on `LOG_FORMAT`. `make dev-up` exports `LOG_FORMAT=pretty`.
+- **Rejected:** piping JSON through jq; multitail with config-file color schemes.
+- **Why:** human-readable logs at the source (where the formatting decision belongs) instead of post-hoc transforms in the dev-loop. JSON in prod (machine-parseable, log-aggregation friendly), text+color in dev. Standard Go pattern. The shape of `dev-tail` is now `multitail` reading already-pretty files.
+
 ## Pending / to be decided later
 
 ### Outbox worker `LISTEN/NOTIFY`

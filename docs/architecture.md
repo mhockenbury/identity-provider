@@ -60,11 +60,22 @@ resolvePermission (handlers.go)
 ```
 
 Env config:
+- `DOCS_DATABASE_URL` — Postgres DSN for postgres-docs (default `postgres://docs:docs@localhost:5435/docs?sslmode=disable`).
 - `TRUSTED_ISSUERS` — comma-separated; each gets its own JWKS cache. Multi-issuer lesson lives here.
 - `OPENFGA_API_URL`, `OPENFGA_STORE_ID`, `OPENFGA_AUTHORIZATION_MODEL_ID` — printed by `idp fga init`.
 - `REQUIRED_AUD` — the resource server's identity (e.g. `docs-api`). Per RFC 8707, the access token's `aud` claim identifies the *resource server*, not the OAuth client. The SPA passes `resource=docs-api` at `/authorize`; the IdP stamps that into `aud`; docs-api requires the match.
 - `ALLOWED_ORIGINS` — CORS for direct-origin testing (dev proxy makes this optional).
-- `DOCS_SEED_{ALICE,BOB,CAROL}` — user UUIDs to bake into the seeded FGA tuples; the corpus has deterministic IDs but the *people* come from the running IdP.
+- `LOG_FORMAT` — `json` (default) or `pretty` (tint-colored text). `make dev-up` sets `pretty`.
+
+**Operator subcommand: `docs-api grant`.** docs-api ships its own CLI for writing FGA tuples that authorize a user against a resource:
+
+```
+docs-api grant <user-uuid> <role> <resource>
+  role:     owner | editor | viewer
+  resource: folder:<uuid>  |  document:<uuid>
+```
+
+Lives on docs-api (not the IdP) because the role/resource vocabulary is docs-api's. The seam between the two services is the user UUID, which the operator pastes from `idp users list`. `make dev-grant` chains a few of these for the seeded corpus; production grants would be admin-tooling automation against this same CLI. Replaces the earlier `SeedFGA`-at-startup shortcut.
 
 ### Admin JSON API (`internal/http/admin`)
 

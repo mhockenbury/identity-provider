@@ -307,8 +307,10 @@ make up                     # docker compose up -d
 make migrate                # IdP schema (psql-driven)
 make migrate-docs           # docs-api schema (goose-driven)
 
-# 2. First-time bootstrap: secrets + signing key + dev user + FGA store
-#    + alice's UUID seed. Idempotent on re-run.
+# 2. First-time bootstrap: secrets + signing key + dev user (stable
+#    UUID via `idp users create --id`) + FGA store init + docs-api
+#    schema + grants for the dev user on the seeded corpus.
+#    Idempotent on re-run.
 make dev-all
 
 # 3. One-time SPA dependency install
