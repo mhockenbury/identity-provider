@@ -2,7 +2,7 @@ export PATH := $(PATH):/usr/local/go/bin:$(HOME)/go/bin
 
 .PHONY: up down migrate run-idp run-outbox-worker run-docs-api test tidy build fmt vet web-install web-dev web-build sonar-export
 .PHONY: up-app down-app restart-app status-app logs-idp logs-outbox-worker logs-docs-api up-all down-all _wait-deps check-deps
-.PHONY: dev-secrets dev-reset dev-key dev-user dev-all dev-serve oauth-url dev-flow check-deps-idp up-idp-only
+.PHONY: dev-secrets dev-reset dev-key dev-user dev-fga dev-seed-alice dev-all dev-serve dev-up dev-down dev-status dev-logs oauth-url dev-flow check-deps-idp up-idp-only
 
 up:
 	docker compose up -d
@@ -270,23 +270,127 @@ dev-user: build check-deps-idp
 		./bin/idp users create "$(DEV_USER_EMAIL)" "$(DEV_USER_PASSWORD)"; \
 	} || { echo "ERROR: make sure $(DEV_ENV_FILE) exists (run: make dev-secrets)"; exit 1; }
 
-# All-in-one: secrets + reset + key + user. The "I haven't touched this
-# in a week, just make it work" button.
-dev-all: dev-secrets dev-reset dev-key dev-user
+# Initialize OpenFGA store + authorization model. Idempotent: if
+# OPENFGA_STORE_ID is already in the env file, skip. Otherwise run
+# `idp fga init` and append the printed lines (with `export ` prefix
+# so shells source them).
+dev-fga: build check-deps-idp
+	@if grep -q '^export OPENFGA_STORE_ID=' "$(DEV_ENV_FILE)" 2>/dev/null; then \
+		echo "OPENFGA_STORE_ID already in $(DEV_ENV_FILE) (use FORCE=1 to recreate)"; \
+		exit 0; \
+	fi; \
+	. "$(DEV_ENV_FILE)" && ./bin/idp fga init \
+		| grep -E '^\s*export OPENFGA_(STORE_ID|AUTHORIZATION_MODEL_ID)=' \
+		| sed 's/^[[:space:]]*//' >> "$(DEV_ENV_FILE)"; \
+	echo "wrote OPENFGA_STORE_ID + OPENFGA_AUTHORIZATION_MODEL_ID to $(DEV_ENV_FILE)"
+
+# Append DOCS_SEED_ALICE=<alice's UUID> to the env file. Idempotent.
+# docs-api reads this to seed FGA tuples that grant alice access to the
+# demo doc/folder corpus.
+dev-seed-alice: build check-deps-idp
+	@if grep -q '^export DOCS_SEED_ALICE=' "$(DEV_ENV_FILE)" 2>/dev/null; then \
+		echo "DOCS_SEED_ALICE already in $(DEV_ENV_FILE)"; \
+		exit 0; \
+	fi; \
+	alice=$$(docker compose exec -T postgres-idp psql -U idp -d idp -tAc \
+		"SELECT id FROM users WHERE email='$(DEV_USER_EMAIL)'" 2>/dev/null | tr -d '[:space:]'); \
+	if [ -z "$$alice" ]; then \
+		echo "ERROR: $(DEV_USER_EMAIL) not found in DB (run: make dev-user)"; \
+		exit 1; \
+	fi; \
+	echo "export DOCS_SEED_ALICE=$$alice" >> "$(DEV_ENV_FILE)"; \
+	echo "wrote DOCS_SEED_ALICE=$$alice to $(DEV_ENV_FILE)"
+
+# All-in-one: secrets + reset + key + user + FGA + alice seed. The
+# "I haven't touched this in a week, just make it work" button.
+dev-all: dev-secrets dev-reset dev-key dev-user dev-fga dev-seed-alice
 	@echo
 	@echo "=== dev environment ready ==="
 	@echo "  user:     $(DEV_USER_EMAIL)"
 	@echo "  password: $(DEV_USER_PASSWORD)"
 	@echo "  client:   $(DEV_CLIENT_ID)"
 	@echo
-	@echo "next: make dev-serve   (start the IdP in foreground)"
+	@echo "next: make dev-up      (background all 3 Go services + Vite)"
+	@echo "      make dev-serve   (foreground IdP only — for debugging)"
 	@echo "      make oauth-url   (print a ready-to-paste /authorize URL)"
 	@echo "      make dev-flow    (drive the full auth-code flow via curl)"
 
 # Run the IdP in the foreground with env from /tmp/idp-env.
-# (Use up-app/down-app for backgrounded operation.)
+# (Use dev-up for backgrounded operation of all four services.)
 dev-serve: build check-deps-idp
 	@. "$(DEV_ENV_FILE)" && ./bin/idp serve
+
+# --- backgrounded-all-services dev loop ---
+#
+# `make dev-up` backgrounds idp + outbox-worker + docs-api + vite, with
+# logs in /tmp/idp-{idp,outbox,docs,web}.log and PIDs in /tmp/idp-*.pid.
+# `make dev-down` kills them. `make dev-status` shows what's running.
+# `make dev-logs SVC=docs` tails one of the four logs.
+#
+# Foreground stays available via `make dev-serve` (idp only) for
+# debugging — when you want a crash to be obvious in your terminal.
+
+DEV_LOG_DIR := /tmp
+DEV_PIDS    := $(DEV_LOG_DIR)/idp-idp.pid $(DEV_LOG_DIR)/idp-outbox.pid $(DEV_LOG_DIR)/idp-docs.pid $(DEV_LOG_DIR)/idp-web.pid
+
+dev-up: build dev-secrets dev-fga dev-seed-alice
+	@if [ ! -d web/node_modules ]; then \
+		echo "==> web/node_modules missing — running web-install"; \
+		$(MAKE) web-install; \
+	fi
+	@echo "==> starting backgrounded services (logs in $(DEV_LOG_DIR)/idp-*.log)"
+	@. "$(DEV_ENV_FILE)" && nohup ./bin/idp serve > $(DEV_LOG_DIR)/idp-idp.log 2>&1 & echo $$! > $(DEV_LOG_DIR)/idp-idp.pid
+	@. "$(DEV_ENV_FILE)" && nohup ./bin/outbox-worker > $(DEV_LOG_DIR)/idp-outbox.log 2>&1 & echo $$! > $(DEV_LOG_DIR)/idp-outbox.pid
+	@. "$(DEV_ENV_FILE)" && \
+		TRUSTED_ISSUERS=http://localhost:8080 \
+		REQUIRED_AUD=docs-api \
+		ALLOWED_ORIGINS=http://localhost:5173 \
+		nohup ./bin/docs-api > $(DEV_LOG_DIR)/idp-docs.log 2>&1 & \
+		echo $$! > $(DEV_LOG_DIR)/idp-docs.pid
+	@cd web && nohup npm run dev > $(DEV_LOG_DIR)/idp-web.log 2>&1 & echo $$! > $(DEV_LOG_DIR)/idp-web.pid
+	@sleep 1
+	@echo
+	@echo "=== services ==="
+	@echo "  idp           :8080  (log: $(DEV_LOG_DIR)/idp-idp.log)"
+	@echo "  outbox-worker        (log: $(DEV_LOG_DIR)/idp-outbox.log)"
+	@echo "  docs-api      :8083  (log: $(DEV_LOG_DIR)/idp-docs.log)"
+	@echo "  web (vite)    :5173  (log: $(DEV_LOG_DIR)/idp-web.log)"
+	@echo
+	@echo "  browser:  http://localhost:5173"
+	@echo "  user:     $(DEV_USER_EMAIL) / $(DEV_USER_PASSWORD)"
+	@echo
+	@echo "  make dev-status   — check what's running"
+	@echo "  make dev-logs SVC=idp|outbox|docs|web   — tail one log"
+	@echo "  make dev-down     — stop everything"
+
+dev-down:
+	@for pidfile in $(DEV_PIDS); do \
+		if [ -f "$$pidfile" ]; then \
+			pid=$$(cat "$$pidfile"); \
+			if kill -0 "$$pid" 2>/dev/null; then \
+				echo "stopping $$pidfile (pid $$pid)"; \
+				kill "$$pid" 2>/dev/null || true; \
+			fi; \
+			rm -f "$$pidfile"; \
+		fi; \
+	done
+
+dev-status:
+	@for pidfile in $(DEV_PIDS); do \
+		name=$$(basename "$$pidfile" .pid | sed 's/^idp-//'); \
+		if [ -f "$$pidfile" ] && kill -0 "$$(cat $$pidfile)" 2>/dev/null; then \
+			printf "  %-10s  RUNNING  pid=%s\n" "$$name" "$$(cat $$pidfile)"; \
+		else \
+			printf "  %-10s  stopped\n" "$$name"; \
+		fi; \
+	done
+
+dev-logs:
+	@if [ -z "$(SVC)" ]; then \
+		echo "usage: make dev-logs SVC=idp|outbox|docs|web"; \
+		exit 1; \
+	fi; \
+	tail -f $(DEV_LOG_DIR)/idp-$(SVC).log
 
 # Print a ready-to-paste /authorize URL with a fresh PKCE challenge.
 # Prints the code_verifier too — you'll need it when exchanging the
