@@ -139,6 +139,7 @@ dev-secrets:
 		echo "export JWT_SIGNING_KEY_ENCRYPTION_KEY=$$kek"; \
 		echo "export CSRF_KEY=$$csrf"; \
 		echo "export ALLOWED_ORIGINS=http://localhost:5173"; \
+		echo "export LOG_LEVEL=debug"; \
 	} > "$(DEV_ENV_FILE)"; \
 	echo "wrote $(DEV_ENV_FILE)"
 
